@@ -1,0 +1,50 @@
+ I want a setup (bash) script for my raspberry pi. All steps should be
+ idempotent and not clobber existing settings, just check and potentially
+ interactively update what's there. Probably the script should be split up, and
+ we end up with:
+ #+begin_src 
+   01_establish_mount_points.sh
+   02_setup_emailproxy_mbsync_sendmail.sh
+   03_setup_smartmontools.sh
+   04_setup_rclone.sh
+   05_setup_backup
+ #+end_src
+
+   - ensure that i have disks by uuid in etc fstab that mount under
+     * =/media/media=
+     * =/media/media_parity=
+     * =/media/nas=
+     * =/media/nas_backup=
+       + if they are not there, guide me by pointing out which disks i have,
+         which names and sizes they have, asking me which of these i want
+         where, then help preview edits to =/etc/fstab= and let me confirm
+
+   - download =uv=, install system-wide
+   - install pypi's =emailproxy= via uv system wide (e.g. under =/opt=)
+   - add a systemd service to start emailproxy with no-gui at boot
+   - interactively let me edit the config for emailproxy to add my gmail, outlook, whatever...
+   - install mbsync
+   - setup =mbsync= config to pull via emailproxy into =/media/nas/Mail/<MAILBOX>=
+     for each configured upstream mailer in emailproxy
+   - add a cron job to run mbsync to sync mail *down only* once a week, ask me
+     what time of day and what weekday it should run; should just skip if the
+     target is not mounted
+   - setup =sendmail= to use emailproxy smtp. ask me which upstream mailer it
+     should use
+
+   - setup smartmontools to monitor all my disks, but make sure they do not
+     spin up for SMART testing if they are currently idle. tell it to use
+     =sendmail= to inform me when sometehing degrades
+   - if smart data shows failure indicators (read errors or relocated sectors),
+     unmount the failing drives
+
+   - set up =rclone= and give me a chance to set up any remotes i need
+   - set up a weekly cron job that syncs all remotes configured in rclone to
+     =/media/nas/<REMOTENAME>=, ask me what time of day and what weekday it
+     should run; should just skip if the target is not mounted
+
+   - setup a weekly cron job that runs rsync backup from =/media/nas= to
+     =/media/nas_backup=, ask me what time of day and what weekday it should run;
+     should just skip if the target is not mounted; should skip if more than N%
+     files would be deleted; it should =sendmail= a report if it failed in that
+     case
