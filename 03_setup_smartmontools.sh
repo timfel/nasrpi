@@ -66,36 +66,55 @@ fi
 # --- alert handler ---------------------------------------------------------------
 # smartd runs it for every alert it mails, e.g.:
 #   nasrpi-smartd-alert.sh /dev/disk/by-uuid/xxxx   (full report on stdin)
-# Whatever the handler prints is mailed by smartd too (plus its own report).
+# With -M exec smartd hands the alert mail to the handler INSTEAD of mailing
+# it itself -- the handler logs, unmounts, and mails the report via sendmail.
 ask AUTO_UNMOUNT "Auto-unmount disks when smartd reports a failure? (else log/mail only)" "y"
 
 cat <<EOF | write_file 755 "$ALERT_BIN"
 #!/bin/sh
 # nasrpi: smartd alert handler (-M exec target).
-# Called by smartd as:  \$0 <device>   with the alert mail on stdin.
+# Called by smartd as:  \$0 <device>   with the alert report on stdin.
+# IMPORTANT: with -M exec, smartd pipes the mail to US INSTEAD of mailing
+# it -- this handler IS the mailer. We log, unmount, then send via
+# sendmail (msmtp shim from step 02).
 # Managed by nasrpi setup scripts (03). Set AUTO_UNMOUNT=no below for
 # alert-only behaviour (no unmounting).
 AUTO_UNMOUNT=$([ "$AUTO_UNMOUNT" = "y" ] && echo yes || echo no)
+NOTIFY_EMAIL=$NOTIFY_EMAIL       # fallback recipient if SMARTD_ADDRESS is unset
 DEV="\${1:-\$SMARTD_DEVICE}"
 LOG=/var/log/nasrpi-smart-alert.log
 
+REPORT=\$(cat)          # the alert report smartd piped in on stdin
+
 {
   echo "===== \$(date '+%F %T') SMART alert for \$DEV ====="
-  cat
+  echo "\$REPORT"
   echo
 } >> "\$LOG" 2>/dev/null || true
 
+NOTES=""
 if [ "\$AUTO_UNMOUNT" = yes ]; then
-  for mp in \$(lsblk -rno MOUNTPOINT "\$DEV" 2>/dev/null | grep .); do
-    if umount -R "\$mp" 2>/dev/null; then
-      echo "nasrpi: UNMOUNTED \$mp (failing disk \$DEV)"
-    else
-      echo "nasrpi: could NOT unmount \$mp (failing disk \$DEV)"
-    fi
-  done
+  NOTES=\$(
+    for mp in \$(lsblk -rno MOUNTPOINT "\$DEV" 2>/dev/null | grep .); do
+      if umount -R "\$mp" 2>/dev/null; then
+        echo "nasrpi: UNMOUNTED \$mp (failing disk \$DEV)"
+      else
+        echo "nasrpi: could NOT unmount \$mp (failing disk \$DEV)"
+      fi
+    done
+  )
 fi
 
-echo "nasrpi: SMART alert for \$DEV at \$(date '+%F %T'); full report in \$LOG."
+# we are the mailer now: send the report plus our notes
+{
+  echo "To: \${SMARTD_ADDRESS:-\$NOTIFY_EMAIL}"
+  echo "Subject: \${SMARTD_SUBJECT:-nasrpi: SMART alert for \$DEV}"
+  echo
+  [ -n "\$NOTES" ] && echo "\$NOTES"
+  echo "nasrpi: SMART alert for \$DEV at \$(date '+%F %T'); full report also in \$LOG."
+  echo
+  echo "\$REPORT"
+} | sendmail -t || echo "nasrpi: FAILED to mail SMART alert for \$DEV" >&2
 EOF
 
 say "03 done. Test with: echo test | sudo $ALERT_BIN /dev/sda"

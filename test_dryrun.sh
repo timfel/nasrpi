@@ -205,8 +205,8 @@ if echo "simulated smartd alert mail body" \
 else
   echo "  FAIL: alert handler failed"; cat "$T/03b.out"; fail=$((fail+1))
 fi
-check "handler output mailed back (stdout)" "SMART alert for" "$T/03b.out"
-check "handler unmounted the disk"  "UNMOUNTED /media/test"     "$T/03b.out"
+check "handler mailed unmount note" "UNMOUNTED /media/test"     "$T/mail.out"
+check "handler mailed the report"   "SMART alert for /dev/disk/by-uuid/fake" "$T/mail.out"
 check "handler called umount -R"    "umount -R /media/test"     "$SB/umount.log"
 
 echo "=== 06 snapraid"
