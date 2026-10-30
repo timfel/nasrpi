@@ -87,6 +87,7 @@ check "msmtprc: emailproxy account" "account emailproxy"          "$R/etc/msmtpr
 check "msmtprc: via emailproxy"     "port 1143"                    "$R/etc/msmtprc"
 check "msmtprc: from account"       "from demo_account"          "$R/etc/msmtprc"
 check "msmtprc: default account"    "account default : emailproxy" "$R/etc/msmtprc"
+check "account-set state stored"  "demo_account"          "$NASRPI_STATE.emailproxy-accounts"
 
 echo "=== 02 rerun: idempotent, no re-prompts"
 sum_before=$(md5sum "$R/etc/mbsyncrc")

@@ -3,6 +3,9 @@
 # - install uv (system-wide) and emailproxy (under /opt/emailproxy)
 # - systemd service: emailproxy --no-gui at boot
 # - interactive: add your mail accounts to emailproxy's config
+# - when the account set changes: OAuth via emailproxy --external-auth
+#   (service stopped, proxy in foreground, one account at a time:
+#    self-send trigger -> surface OAuth URL -> paste redirect URL back)
 # - mbsync pulling via emailproxy into /media/nas/Mail/<MAILBOX> (down only)
 # - weekly cron for mbsync (skips when /media/nas is not mounted)
 # - sendmail via msmtp + msmtp-mta, relaying through emailproxy's SMTP port
@@ -113,6 +116,100 @@ if [ "${#ACCOUNTS[@]}" -eq 0 ]; then
 fi
 say "Mail accounts found in emailproxy: ${ACCOUNTS[*]}"
 
+# --- OAuth external authentication (whenever the account set changes) -------------
+# With --external-auth, emailproxy prints an OAuth URL to its output when no
+# valid token exists, then waits for the redirect URL to be pasted back on
+# stdin. So: stop the systemd service, run emailproxy in the foreground
+# (attached, output streamed), trigger one self-addressed send per account in
+# the background, surface the URL for the browser, paste the token/redirect back.
+EP_ACCTS_STATE="${NASRPI_STATE:-$HOME/.nasrpi-state}.emailproxy-accounts"
+
+auth_trigger() {  # force upstream activity for account $1, to make emailproxy need a token
+  # NOTE: if your accounts.ini defines local client passwords, msmtp must
+  # authenticate -- add --password=... here or use /etc/msmtprc profiles.
+  { echo "To: $1"; echo "Subject: nasrpi auth trigger"; echo; echo "trigger"; } \
+    | msmtp --host 127.0.0.1 --port 1143 --from "$1" --user "$1" "$1"
+}
+
+EP_LINE=""
+ep_read_until() {  # $1 = ERE pattern, $2 = timeout secs; streams proxy output meanwhile
+  local pat=$1 end=$((SECONDS + $2)) rc=1
+  local line
+  while (( SECONDS < end )); do
+    if IFS= read -r -t 1 -u "$EP_OUT_FD" line; then
+      echo "  [emailproxy] $line"
+      if printf '%s\n' "$line" | grep -qE "$pat"; then
+        EP_LINE=$line; rc=0; break
+      fi
+    fi
+  done
+  return $rc
+}
+
+external_auth_flow() {  # $@ = accounts to (re)authenticate
+  local acct pasted url
+  say "OAuth external-authentication for: $*"
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    warn "DRY_RUN: would stop the emailproxy service, run it with --external-auth"
+    warn "DRY_RUN: in the foreground, self-send per account, surface the OAuth URL"
+    warn "DRY_RUN: and forward your pasted redirect URL back to the proxy."
+    return 0
+  fi
+
+  warn "emailproxy.service is stopped during this flow (foreground emailproxy owns stdin/stdout)"
+  systemctl stop emailproxy.service
+
+  # foreground proxy, attached: its output streams to us, its stdin we write to
+  coproc EP { "$EP_BIN" --no-gui --external-auth 2>&1; }
+  local EP_OUT_FD=${EP[0]}
+
+  ep_read_until 'istening|roxying|arted' 30 \
+    || warn "emailproxy did not report listening within 30s -- continuing anyway"
+
+  for acct in "$@"; do
+    say "Account: $acct -- triggering self-addressed test mail (background)..."
+    ( sleep 2; auth_trigger "$acct" ) &   # if no token: proxy prints auth URL next
+    url=""
+    if ep_read_until 'https?://' 30; then
+      url=$(printf '%s\n' "$EP_LINE" | grep -oE 'https?://[^[:space:]]+' | head -1)
+      echo
+      echo "  ==== authentication needed for $acct ===="
+      echo "  1) open this URL in your browser:"
+      echo
+      echo "       $url"
+      echo
+      echo "  2) sign in; the browser ends on a redirect URL that will not load"
+      echo "  3) copy the FULL final URL from the address bar and paste it here"
+      IFS= read -r -p "  pasted URL (empty = skip): " pasted < /dev/tty
+      if [ -n "$pasted" ]; then
+        printf '%s\n' "$pasted" >&"${EP[1]}"
+        ep_read_until 'uthentication (completed|complete|success)|okens? (acquired|refreshed)|received' 90 \
+          || warn "no clear completion message for $acct -- check the streamed output above"
+        ok "auth exchange completed for $acct"
+      else
+        warn "skipped $acct"
+      fi
+    else
+      ok "no auth URL for $acct within 30s -- token still valid, nothing to do"
+    fi
+  done
+
+  kill "$EP_PID" 2>/dev/null || true
+  wait "$EP_PID" 2>/dev/null || true
+  systemctl start emailproxy.service
+  ok "emailproxy.service restored"
+}
+
+# run the flow only when the configured account set actually changed
+EP_ACCTS_CUR=$(printf '%s\n' "${ACCOUNTS[@]}" | sort)
+EP_ACCTS_PREV=""
+[ -f "$EP_ACCTS_STATE" ] && EP_ACCTS_PREV=$(cat "$EP_ACCTS_STATE")
+if [ "$EP_ACCTS_CUR" != "$EP_ACCTS_PREV" ]; then
+  external_auth_flow "${ACCOUNTS[@]}"
+  printf '%s\n' "$EP_ACCTS_CUR" > "$EP_ACCTS_STATE"
+  ok "account set recorded ($EP_ACCTS_STATE) -- external-auth flow reruns only on change"
+fi
+
 # --- mbsync ----------------------------------------------------------------------
 apt_install isync
 
@@ -175,7 +272,7 @@ EOF
 
 if build_mbsyncrc | write_file 644 "$MBSYNCRC"; then
   if [ "${DRY_RUN:-0}" != "1" ] && run_once "mbsync -c $MBSYNCRC"; then
-    echo "  First sync: enter any passwords emailproxy asks for."
+    echo "  First sync (tokens acquired via the external-auth flow above)."
     mbsync -c "$MBSYNCRC" -a || warn "initial sync failed (is emailproxy running?)"
   fi
 fi
