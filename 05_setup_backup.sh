@@ -10,7 +10,7 @@ source ./lib.sh
 
 say "05 - backup /media/nas -> /media/nas_backup"
 apt_install rsync
-# sendmail comes from postfix (installed by 02); warn if it is missing.
+# sendmail comes from msmtp-mta (installed by 02); warn if it is missing.
 [ "${DRY_RUN:-0}" = "1" ] || command -v sendmail >/dev/null \
   || warn "no sendmail found -- run step 02 first, reports will be printed only"
 

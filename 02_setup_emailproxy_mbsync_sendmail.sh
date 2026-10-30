@@ -5,7 +5,7 @@
 # - interactive: add your mail accounts to emailproxy's config
 # - mbsync pulling via emailproxy into /media/nas/Mail/<MAILBOX> (down only)
 # - weekly cron for mbsync (skips when /media/nas is not mounted)
-# - sendmail (postfix) relaying through emailproxy's SMTP port
+# - sendmail via msmtp + msmtp-mta, relaying through emailproxy's SMTP port
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./lib.sh
@@ -191,9 +191,9 @@ ask_dow_hour MAIL
 install_cron nasrpi-mail "$MAIL_DOW $MAIL_HOUR $MAIL_MIN" \
   "/usr/local/bin/nasrpi-mail-sync.sh"
 
-# --- sendmail (postfix) relaying through emailproxy ------------------------------
-say "sendmail: outgoing mail via emailproxy SMTP (localhost:1143)"
-apt_install postfix
+# --- sendmail: msmtp (+ msmtp-mta) relaying through emailproxy --------------------
+say "sendmail: outgoing mail via msmtp -> emailproxy SMTP (localhost:1143)"
+apt_install msmtp msmtp-mta   # msmtp-mta provides /usr/sbin/sendmail for all tools
 smtp_account=${ACCOUNTS[0]}
 if [ "${#ACCOUNTS[@]}" -gt 1 ] && [ "${DRY_RUN:-0}" != "1" ]; then
   echo "  Which upstream mailer should sendmail use?"
@@ -205,16 +205,44 @@ if [ "${#ACCOUNTS[@]}" -gt 1 ] && [ "${DRY_RUN:-0}" != "1" ]; then
 else
   ok "using ${smtp_account} for outgoing mail"
 fi
-if [ "${DRY_RUN:-0}" = "1" ]; then
-  warn "DRY_RUN: would set relayhost=[127.0.0.1]:1143 (as $smtp_account)"
-else
-  postconf -e "relayhost = [127.0.0.1]:1143"
-  postconf -e "smtp_sasl_auth_enable = yes"
-  postconf -e "smtp_sasl_password_maps = static:$smtp_account"
-  postconf -e "smtp_sasl_security = noplaintext noanonymous"
-  postconf -e "smtp_tls_security_level = none"
-  systemctl restart postfix
-  ok "postfix relaying through emailproxy as $smtp_account"
+# msmtp reads /etc/msmtprc system-wide (msmtp-mta wires it to sendmail).
+# Note: a personal ~/.msmtprc would override this file -- avoid one for root.
+MSMTPRC="$NASRPI_ETC_DIR/msmtprc"          # write_file() applies the dry-run shadow
+MSMTPRC_VIEW=$(drify "$NASRPI_ETC_DIR/msmtprc")   # where an existing file would be
+SMTP_PASS=""
+if [ ! -f "$MSMTPRC_VIEW" ] || confirm "Existing msmtp config found. Re-enter SMTP password/auth?"; then
+  read -r -p "  SMTP password for emailproxy (empty = no AUTH): " SMTP_PASS || SMTP_PASS=""
+fi
+build_msmtprc() {
+  echo "# Managed by nasrpi setup scripts (02); rerun 02 to regenerate."
+  echo "defaults"
+  echo "tls off"
+  echo
+  echo "account emailproxy"
+  echo "host 127.0.0.1"
+  echo "port 1143"
+  echo "from $smtp_account"
+  if [ -n "$SMTP_PASS" ]; then
+    echo "auth on"
+    echo "user $smtp_account"
+    echo "password $SMTP_PASS"
+  else
+    echo "auth off"
+  fi
+  echo
+  echo "account default : emailproxy"
+}
+build_msmtprc | write_file 600 "$MSMTPRC" || warn "kept existing msmtp config"
+if [ "${DRY_RUN:-0}" != "1" ]; then
+  # sanity check: does it actually talk to emailproxy?
+  if confirm "Send a test mail to $smtp_account to verify?"; then
+    if { echo "To: $smtp_account"; echo "Subject: nasrpi test mail"; echo; echo "test"; } \
+         | sendmail -t 2>/dev/null; then
+      ok "sendmail (msmtp) relays through emailproxy as $smtp_account"
+    else
+      warn "test send failed -- check $MSMTPRC and that emailproxy is running"
+    fi
+  fi
 fi
 
 say "02 done."

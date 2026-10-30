@@ -13,7 +13,7 @@ SMARTCTL_CFG="$NASRPI_ETC_DIR/smartd.conf"
 CHECKER=/usr/local/bin/nasrpi-smart-check.sh
 
 say "03 - smartmontools"
-apt_install smartmontools mailutils
+apt_install smartmontools   # sendmail (msmtp-mta) comes from step 02
 
 ask NOTIFY_EMAIL "Address to receive SMART alerts" "root"
 
@@ -101,7 +101,12 @@ for dev in \$(lsblk -dno NAME,TYPE | awk '\$2=="disk"{print "/dev/"\$1}'); do
 done
 
 if [ "\$FAILED" = 1 ]; then
-  cat "\$REPORT" | mail -s "nasrpi: SMART failure detected on \$(hostname)" "\$NOTIFY_EMAIL"
+  {
+    echo "To: \$NOTIFY_EMAIL"
+    echo "Subject: nasrpi: SMART failure detected on \$(hostname)"
+    echo
+    cat "\$REPORT"
+  } | sendmail -t 2>/dev/null || cat "\$REPORT"
 fi
 rm -f "\$REPORT"
 EOF

@@ -71,7 +71,8 @@ check "reports already set up" "already set up" "$T/01b.out"
 echo "=== 02 emailproxy/mbsync/sendmail"
 # answers: service y, add-accounts y, restart y, mailbox-names y, folder=demo,
 #          dow=0 hour=3 min=15, cron-install y
-runtest 02 'y\ny\ny\ny\ndemo\n0\n3\n15\ny\n' ./02_setup_emailproxy_mbsync_sendmail.sh
+runtest02_input='y\ny\ny\ny\ndemo\n0\n3\n15\ny\n\n'   # last line: msmtp password (empty = auth off)
+runtest 02 "$runtest02_input" ./02_setup_emailproxy_mbsync_sendmail.sh
 check "systemd unit created"        "ExecStart=/opt/emailproxy/bin/emailproxy --no-gui" "$R/etc/systemd/system/emailproxy.service"
 check "mbsyncrc: account block"     "IMAPAccount demo_account" "$R/etc/mbsyncrc"
 check "mbsyncrc: via emailproxy"    "Port 1143"                "$R/etc/mbsyncrc"
@@ -80,6 +81,10 @@ check "mbsyncrc: chosen mail folder" "/media/nas/Mail/demo/"         "$R/etc/mbs
 check "mail cron installed"         "nasrpi-mail-sync.sh"      "$R/etc/cron.d/nasrpi-mail"
 check "mail cron schedule"          "15 3 * * 0 root"          "$R/etc/cron.d/nasrpi-mail"
 check "mail sync skips unmounted"   "mountpoint -q /media/nas" "$R/usr/local/bin/nasrpi-mail-sync.sh"
+check "msmtprc: emailproxy account" "account emailproxy"          "$R/etc/msmtprc"
+check "msmtprc: via emailproxy"     "port 1143"                    "$R/etc/msmtprc"
+check "msmtprc: from account"       "from demo_account"          "$R/etc/msmtprc"
+check "msmtprc: default account"    "account default : emailproxy" "$R/etc/msmtprc"
 
 echo "=== 02 rerun: idempotent, no re-prompts"
 sum_before=$(md5sum "$R/etc/mbsyncrc")
@@ -92,8 +97,8 @@ check "mbsyncrc reported up to date"  "already up to date" "$T/02b.out"
 
 echo "=== 03 smartmontools"
 runtest 03 'alerts@example.com\ny\n6\n2\n30\ny\n' ./03_setup_smartmontools.sh
-check "smartd monitors sda"       "/dev/sda -a -m alerts@example.com" "$R/etc/smartd.conf"
-check "smartd covers all disks"    "/dev/sdd -a"                       "$R/etc/smartd.conf"
+check "smartd monitors sda"       "/dev/sda -n standby,q -a -m alerts@example.com" "$R/etc/smartd.conf"
+check "smartd covers all disks"    "/dev/sdd -n standby,q -a"          "$R/etc/smartd.conf"
 check "no spin-up for self-tests"  "-d maint"                          "$R/etc/smartd.conf"
 check "smartd watches attrs"    "-I 5 -I 187 -I 197 -I 198"        "$R/etc/smartd.conf"
 check "smart cron installed"      "nasrpi-smart-check.sh"      "$R/etc/cron.d/nasrpi-smart"
@@ -101,7 +106,7 @@ check "zero-tolerance attrs"      "FAIL_ATTRS="                        "$R/usr/l
 check "zero-tolerance: reallocated" "Reallocated_Sector_Ct"              "$R/usr/local/bin/nasrpi-smart-check.sh"
 check "zero-tolerance: pending"     "Current_Pending_Sector"             "$R/usr/local/bin/nasrpi-smart-check.sh"
 check "checker unmounts failures" "umount -R"                          "$R/usr/local/bin/nasrpi-smart-check.sh"
-check "checker mails a report"    "mail -s"                              "$R/usr/local/bin/nasrpi-smart-check.sh"
+check "checker mails via sendmail" "sendmail -t"                         "$R/usr/local/bin/nasrpi-smart-check.sh"
 sh -n "$R/usr/local/bin/nasrpi-smart-check.sh" \
   && { echo "  PASS: smart checker syntax"; pass=$((pass+1)); } \
   || { echo "  FAIL: smart checker syntax"; fail=$((fail+1)); }

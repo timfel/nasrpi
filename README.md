@@ -20,7 +20,7 @@ missing, and asks before touching anything. Shared helpers live in `lib.sh`
 | Script | Does |
 |---|---|
 | 01 | Puts your four disks into `/etc/fstab` (by UUID) at `/media/media`, `/media/media_parity`, `/media/nas`, `/media/nas_backup`. Guides you through picking disks by name/size, previews the fstab edit, backs up fstab first. |
-| 02 | Installs `uv` + `emailproxy` (under `/opt/emailproxy`), a systemd service `emailproxy` (`--no-gui`) at boot, lets you add Gmail/Outlook/... accounts to its config, generates `/etc/mbsyncrc` that pulls **down only** into `/media/nas/Mail/<MAILBOX>`, weekly mbsync cron (skips when `/media/nas` unmounted), and configures sendmail (postfix) to relay through emailproxy (localhost:1143) with the upstream mailer you pick. |
+| 02 | Installs `uv` + `emailproxy` (under `/opt/emailproxy`), a systemd service `emailproxy` (`--no-gui`) at boot, lets you add Gmail/Outlook/... accounts to its config, generates `/etc/mbsyncrc` that pulls **down only** into `/media/nas/Mail/<MAILBOX>`, weekly mbsync cron (skips when `/media/nas` unmounted), and sets up **msmtp** (plus `msmtp-mta`, which provides `/usr/sbin/sendmail`) so every script, smartd and cron job sends mail through `/etc/msmtprc` → emailproxy (localhost:1143) with the upstream mailer you pick. |
 | 03 | smartmontools: monitors all disks, short tests nightly / long weekly but **never spins up spun-down disks** (`-d maint`), mails you via sendmail on degradation, and a daily checker that **unmounts** disks showing SMART failure indicators and mails a report. **Zero tolerance:** even a single reallocated / pending / uncorrectable sector, or any entry in the error log, counts as failure (edit `FAIL_ATTRS` at the top of `/usr/local/bin/nasrpi-smart-check.sh` to tune). |
 | 04 | Installs rclone, runs `rclone config` so you can add remotes, then a weekly cron copying every remote into `/media/nas/<REMOTENAME>` (skips when unmounted). |
 | 05 | Weekly cron: `rsync -a --delete /media/nas/ /media/nas_backup/`. Dry-runs first: if more than N% of dest files would be deleted it aborts and **sends you a report** instead. Also mails on failure. Skips when either mount is missing. |
@@ -46,8 +46,10 @@ missing, and asks before touching anything. Shared helpers live in `lib.sh`
 - emailproxy asks for app passwords per account (Gmail needs an app password).
   If `mbsync` complains about authentication, replace `Pass *` in
   `/etc/mbsyncrc` with the literal password.
-- postfix SASL uses `static:<user>` — emailproxy accepts any/none password
-  for localhost by default; adjust in `main.cf` if your setup differs.
+- Outgoing mail always goes through msmtp (`/etc/msmtprc`, mode 600) via the
+  `sendmail` compatibility shim from `msmtp-mta`. If emailproxy requires no
+  password for localhost, leave the password prompt empty (`auth off`).
+  Beware: a `~/.msmtprc` would override the system config for that user.
 - 05's safety net compares proposed deletions against the dest file count;
   the first run against an empty destination deletes nothing.
 
