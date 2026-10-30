@@ -277,7 +277,7 @@ def imap_login(argv):
     parser.add_argument("--user", required=False)
     parser.add_argument("--password", default="")
     opts = parser.parse_args(argv)
-    if not (opts.host and opts.port and opts.user):
+    if not (opts.host and opts.port and opts.user and opts.password):
         sys.stderr.write("nasrpi: imap-login needs --host, --port, --user, --password\n")
         return 2
     try:

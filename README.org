@@ -124,10 +124,12 @@ when either mount is missing.
   =~/.nasrpi-state.emailproxy-accounts=~ — delete it to force a re-auth.
   Catch-all accounts (=[@domain.com]= with ~allow_catch_all_accounts~) are not
   enumerable; rerun 02 when new ones show up.
+- The local proxy password is **mandatory**: emailproxy aborts any login without
+  one (=Login failed - no password provided for account ...=), so there is no
+  ~auth off~ mode — msmtp is always written with ~auth on~.
 - Outgoing mail always goes through msmtp (=~/etc/msmtprc~, mode 600) via the
-  ~sendmail~ compatibility shim from ~msmtp-mta~. If emailproxy requires no
-  password for localhost, leave the password prompt empty (~auth off~). Beware:
-  a =~/.msmtprc~= would override the system config for that user.
+  ~sendmail~ compatibility shim from ~msmtp-mta~. Beware: a =~/.msmtprc~=
+  would override the system config for that user.
 - 05's safety net compares proposed deletions against the destination file
   count; the first run against an empty destination deletes nothing.
 
