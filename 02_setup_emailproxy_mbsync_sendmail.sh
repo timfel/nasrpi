@@ -80,6 +80,7 @@ fi
 if run_once "emailproxy-accounts"; then
   echo "  Add your Gmail / Outlook / whatever accounts in the editor."
   echo "  (emailproxy's local IMAP/SMTP port defaults to 1143.)"
+  sleep 5
   [ "${DRY_RUN:-0}" != "1" ] && edit_file "$EP_ACCOUNTS"
   if confirm "Accounts added -- restart emailproxy now?"; then
     [ "${DRY_RUN:-0}" != "1" ] && systemctl restart emailproxy.service
@@ -165,6 +166,7 @@ Master $name-remote
 Slave $name-local
 # Down only: pull new/changed mail, never push local changes upstream.
 Sync Pull
+Expunge Slave
 New Remote
 CopyArrivalDate yes
 EOF

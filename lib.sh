@@ -185,7 +185,7 @@ drify() {
 # Edit a file with $EDITOR; fall back gracefully
 edit_file() {
   local f=$1
-  "${EDITOR:-$(command -v nano || command -v vi)}" "$f"
+  "${EDITOR:-$(command -v emacs || command -v nano || command -v vi)}" "$f"
 }
 
 # Ask for a destination under /media/nas/<name> for an item (remotes, mailboxes)

@@ -30,7 +30,7 @@ build_smartd() {
   echo "# zero tolerance: 5 reallocated, 187 uncorrected, 197 pending, 198 uncorrectable."
   local d
   for d in $DISKS; do
-    echo "$d -a -m $NOTIFY_EMAIL -o on -s (S/../.././02|L/../../6/03) -d maint -I 5 -I 187 -I 197 -I 198"
+    echo "$d -n standby,q -a -m $NOTIFY_EMAIL -o on -s (S/../.././09|L/../../6/10) -d maint -I 5 -I 187 -I 197 -I 198"
   done
 }
 

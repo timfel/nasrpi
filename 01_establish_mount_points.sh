@@ -33,7 +33,7 @@ done
 # --- What disks do we have? ---------------------------------------------------
 say "Available block devices"
 if ! command -v lsblk >/dev/null; then
-  die "lsblk not found -- install util-linux (apt-get install -y util-linux) and rerun."
+  apt_install util-linux
 fi
 DISK_LIST=$(lsblk -dpno NAME,SIZE,MODEL,FSTYPE | sort)
 echo "$DISK_LIST" | sed 's/^/  /'
@@ -85,7 +85,7 @@ for mp in "${NASRPI_MOUNTS[@]}"; do
       uuid=${dev_uuid[$dev]}
       size=$(lsblk -dno SIZE "$dev")
       model=$(lsblk -dno MODEL "$dev" | xargs)
-      line="UUID=$uuid  $mp  ext4  defaults,nofail  0  2"
+      line="UUID=$uuid  $mp  ext4  defaults,user,noatime,nofail  0  2"
       echo
       echo "  $dev ($size${model:+, $model}) ->"
       echo "    $line"
