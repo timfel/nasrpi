@@ -17,18 +17,15 @@ say "06 - snapraid (content: $MEDIA_DIR, parity: $PARITY_DIR)"
 apt_install snapraid
 ask NOTIFY_EMAIL "Address to receive snapraid reports" "root"
 
-build_conf() {   # uses PARITY_FILE and DIRS
+build_conf() {   # uses PARITY_FILE
   echo "# Managed by nasrpi setup scripts (06); rerun 06 to regenerate."
   echo "parity $PARITY_FILE"
   # two content-file copies: one local (fast), one off-disk (safe)
   echo "content /root/.snapraid/snapraid.content.1"
   echo "content $PARITY_DIR/.snapraid/snapraid.content.2"
   echo "data $MEDIA_DIR"
-  local d n
-  for d in "${DIRS[@]}"; do
-    n=$(derive_name "${d##*/}")
-    echo "add $n $d"
-  done
+  # protect EVERYTHING under the content disk, recursively
+  echo "add media $MEDIA_DIR"
 }
 
 # --- config -----------------------------------------------------------------------
@@ -38,33 +35,8 @@ else
   say "Configuring snapraid"
   ask PARITY_FILE  "Parity file path" "$PARITY_DIR/snapraid.parity"
 
-  # discover content directories under MEDIA_DIR
-  DIRS=()
-  if [ -d "$MEDIA_DIR" ]; then
-    mapfile -t DIRS < <(find "$MEDIA_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | sort)
-  fi
-  if [ "${#DIRS[@]}" -gt 0 ]; then
-    say "Directories to protect:"
-    i=0
-    for d in "${DIRS[@]}"; do
-      i=$((i+1)); echo "  $i) $d"
-    done
-    read -r -p "  Numbers to EXCLUDE (space-separated, empty = all): " EXCLUDE || EXCLUDE=""
-    KEEP=()
-    i=0
-    for d in "${DIRS[@]}"; do
-      i=$((i+1))
-      skip=no
-      for e in $EXCLUDE; do
-        [ "$e" = "$i" ] && skip=yes
-      done
-      [ "$skip" = yes ] || KEEP+=("$d")
-    done
-    DIRS=("${KEEP[@]}")
-  else
-    warn "$MEDIA_DIR not found/mounted -- generating config without data dirs for now"
-  fi
-
+  # everything under $MEDIA_DIR is protected (single recursive "add")
+  [ -d "$MEDIA_DIR" ] || warn "$MEDIA_DIR not mounted? config still generated"
   build_conf | write_file 644 "$CONF" || die "not writing snapraid config"
 
   # --- guide me if the parity location is too small ------------------------------

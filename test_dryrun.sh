@@ -212,12 +212,11 @@ check "handler called umount -R"    "umount -R /media/test"     "$SB/umount.log"
 echo "=== 06 snapraid"
 export NASRPI_MEDIA_DIR="$T/media" NASRPI_PARITY_DIR="$T/parity"
 mkdir -p "$T/media/photos" "$T/media/music" "$T/parity"
-runtest 06 'alerts@example.com\n\n\nn\n3\n5\n30\ny\n' ./06_setup_snapraid.sh
+runtest 06 'alerts@example.com\n\nn\n3\n5\n30\ny\n' ./06_setup_snapraid.sh   # blank line = default parity path
 SNAP="$R/usr/local/bin/nasrpi-snapraid.sh"
 check "snapraid conf: parity file"  "parity $T/parity/snapraid.parity" "$R/etc/snapraid.conf"
 check "snapraid conf: data dir"     "data $T/media"                    "$R/etc/snapraid.conf"
-check "snapraid conf: add music"    "add music $T/media/music"         "$R/etc/snapraid.conf"
-check "snapraid conf: add photos"   "add photos $T/media/photos"       "$R/etc/snapraid.conf"
+check "snapraid conf: protects all" "add media $T/media"              "$R/etc/snapraid.conf"
 check "snapraid conf: content copies" "content "                       "$R/etc/snapraid.conf"
 check "snapraid cron installed"     "nasrpi-snapraid.sh"               "$R/etc/cron.d/nasrpi-snapraid"
 bash -n "$SNAP" \
