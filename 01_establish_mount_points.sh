@@ -13,12 +13,11 @@ say "01 - Establish mount points"
 declare -A assigned_to   # UUID -> mount point
 declare -A wanted        # mount point -> UUID chosen this run
 FSTAB=$(cat "$NASRPI_FSTAB" 2>/dev/null || echo "")
-
 # --- What does fstab already provide? ---------------------------------------
 for mp in "${NASRPI_MOUNTS[@]}"; do
   line=$(echo "$FSTAB" | grep -v '^[[:space:]]*#' | awk -v m="$mp" '$2==m {print; exit}')
   if [ -n "$line" ]; then
-    uuid=$(echo "$line" | grep -oE 'UUID=[0-9A-Fa-f-]+' | head -1)
+    uuid=$(echo "$line" | grep -oE 'UUID=[0-9A-Fa-f-]+' | head -1 || true)
     if [ -n "$uuid" ]; then
       assigned_to["$uuid"]="$mp"
       wanted["$mp"]="$uuid"

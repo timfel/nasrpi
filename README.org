@@ -1,0 +1,138 @@
+* nasrpi setup scripts
+
+Idempotent, interactive setup scripts for the NAS Raspberry Pi. Run them in
+order, as root, on the Pi:
+
+#+begin_src sh
+sudo ./01_establish_mount_points.sh
+sudo ./02_setup_emailproxy_mbsync_sendmail.sh
+sudo ./03_setup_smartmontools.sh
+sudo ./04_setup_rclone.sh
+sudo ./05_setup_backup.sh
+#+end_src
+
+Run any of them again any time: everything checks first, changes only what's
+missing, and asks before touching anything. Shared helpers live in ~lib.sh~
+(prompts, cron installer, package installer) — tweak there first.
+
+** What each script does
+
+*** 01 — Mount points
+
+Puts your four disks into =/etc/fstab= (by UUID) at =/media/media=,
+=/media/media_parity=, =/media/nas= and =/media/nas_backup=. Guides you through
+picking disks by name/size, previews the fstab edit, and backs up fstab first.
+
+*** 02 — emailproxy, mbsync, sendmail
+
+- Installs ~uv~ + ~emailproxy~ under =/opt/emailproxy=, and creates a systemd
+  service named ~emailproxy~ that runs ~=--no-gui=~ at boot.
+- Lets you add Gmail/Outlook/... accounts to its config, then runs emailproxy's
+  ~=--external-auth=~ OAuth flow whenever the account set changes. The service is
+  stopped during OAuth; emailproxy runs in the foreground, triggers a
+  self-addressed test mail per account, prints the OAuth URL for your browser,
+  and prompts you to paste the redirect URL back into the terminal.
+- Generates =/etc/mbsyncrc= to pull *down only* into
+  =/media/nas/Mail/<MAILBOX>=, and installs a weekly mbsync cron job that skips
+  when =/media/nas= is unmounted.
+- Sets up *msmtp* (plus ~msmtp-mta~, which provides =/usr/sbin/sendmail=) so
+  every script, smartd and cron job sends mail through =/etc/msmtprc= →
+  emailproxy (~localhost:1143=) using the upstream mailer you pick.
+
+*** 03 — smartmontools
+
+- Installs smartmontools to monitor all disks *via =/dev/disk/by-uuid=*.
+  Schedules short tests nightly and long tests weekly, but *never spins up
+  spun-down disks* (=-d maint=).
+- smartd sends alert mail itself; each alert also runs a =-M exec= handler:
+  =/usr/local/bin/nasrpi-smartd-alert.sh=. The device is passed as an argument
+  and the report arrives on stdin. The handler logs to
+  =/var/log/nasrpi-smart-alert.log= and *unmounts the failing disk*
+  (=AUTO_UNMOUNT= at its top).
+- *Zero tolerance:* =-I 5 -I 187 -I 197 -I 198= sends mail and triggers the
+  handler as soon as reallocated, uncorrected or pending sector counts change at
+  all.
+
+*** 04 — rclone
+
+Installs rclone and runs ~rclone config~ so you can add remotes. Then installs a
+weekly cron job that copies every remote into =/media/nas/<REMOTENAME>=. Skips
+when =/media/nas= is unmounted.
+
+*** 05 — Backup
+
+Installs a weekly cron job running ~rsync -a --delete /media/nas/
+/media/nas_backup=~. Dry-runs first; if more than N% of destination files would
+be deleted, it aborts and *sends you a report*. Also mails on failure. Skips
+when either mount is missing.
+
+*** 06 — snapraid
+
+- Sets up snapraid with content on =/media/media= and parity on
+  =/media/media_parity=. Generates =/etc/snapraid.conf= to protect *everything*
+  under =/media/media= with one recursive ~add media~. Runs a snapraid dry-run
+  and *guides you if the parity location is too small*; optionally builds initial
+  parity.
+- Then installs a weekly cron job that runs ~snapraid sync~ + ~snapraid scrub~,
+  skips when unmounted, and mails you if either operation reports an error.
+
+** Tweaking
+
+- Cron schedules: rerun the script, or edit =/etc/cron.d/nasrpi-*= directly.
+- Folder names for mail / remotes: =/opt/emailproxy/.nasrpi-mailmaps=,
+  =/etc/nasrpi-rclone-maps= — plain ~name=folder~ files, edit freely.
+- Backup knobs (~NOTIFY_EMAIL~, ~DELETE_PCT~): top of
+  =/usr/local/bin/nasrpi-backup.sh=.
+- SMART alert behaviour: ~AUTO_UNMOUNT~ at the top of
+  =/usr/local/bin/nasrpi-smartd-alert.sh= (set ~no~ for log/mail only); watched
+  attributes are the =-I= list in =/etc/smartd.conf= (zero tolerance by default).
+  Rerun 03 after adding or removing disks.
+- Snapraid layout: =/etc/snapraid.conf= (edit freely; rerunning 06 leaves it
+  alone once it exists).
+- One-shot steps (add accounts, initial sync...) are remembered in
+  =~/.nasrpi-state=~; delete a line to re-trigger a step.
+
+** Notes / gotchas
+
+- Needs Debian/Raspbian (~apt~) on the Pi; scripts exit cleanly elsewhere.
+- emailproxy asks for app passwords per account (Gmail needs an app password).
+  If ~mbsync~ complains about authentication, replace =Pass *= in
+  =/etc/mbsyncrc= with the literal password.
+- OAuth tokens: whenever the account list in emailproxy's config changes, 02
+  stops the service and runs ~emailproxy --external-auth~ attached to your
+  terminal, one account at a time (self-send trigger → open URL → paste the
+  browser's final redirect URL back). The change-detection key is
+  =~/.nasrpi-state.emailproxy-accounts=~ — delete it to force a full re-auth. If
+  your ~accounts.ini~ uses local client passwords, edit ~auth_trigger()~ at the
+  top of script 02 so the trigger mail authenticates.
+- Outgoing mail always goes through msmtp (=~/etc/msmtprc~, mode 600) via the
+  ~sendmail~ compatibility shim from ~msmtp-mta~. If emailproxy requires no
+  password for localhost, leave the password prompt empty (~auth off~). Beware:
+  a =~/.msmtprc~= would override the system config for that user.
+- 05's safety net compares proposed deletions against the destination file
+  count; the first run against an empty destination deletes nothing.
+
+** Also interesting
+
+- fstab entries are preserved, so we can easily have other layouts; the UUID
+  thing is just for first setup. I currently have this, for example:
+
+#+begin_src conf
+UUID=ecd58ff4-321e-4ef3-aa5c-5780ac3b4b06 /media/mybook3t   ext4     defaults,users,noatime   0       0
+UUID=aad89fad-734a-4536-baba-934e8071ee9e /media/mybook12t  ext4     defaults,users,noatime   0       0
+UUID=960d7f19-9d20-47ec-8aa0-18b962e1671b /media/laptop1t   ext4     defaults,users,noatime   0       0
+UUID=9f83aad5-4997-44be-8562-ea529cd3e586 /media/fullsize2t ext4     defaults,users,noatime   0       0
+UUID=78247AAC247A6D4E                     /media/mybook16t  ntfs-3g  defaults,users,noatime,uid=1000,gid=1000,umask=0002   0       0
+/media/mybook12t                   /media/media        none           defaults,users,bind,nofail 0 0
+/media/mybook16t                   /media/media_parity none           defaults,users,bind,nofail 0 0
+/media/mybook3t                    /media/nas          none           defaults,users,bind,nofail 0 0
+/media/laptop1t:/media/fullsize2t  /media/nas_backup   fuse.mergerfs  defaults,users,nofail,allow_other,cache.files=off,dropcacheonclose=true,category.create=mfs,moveonenospc=true,minfreespace=4G,fsname=mergerfs  0  0
+#+end_src
+
+** Testing without the Pi
+
+#+begin_src bash
+./test_dryrun.sh          # runs every script with DRY_RUN=1 and fake paths
+#+end_src
+
+Nothing is written outside =/tmp= in dry-run mode; root actions are printed.
