@@ -117,7 +117,7 @@ say "Mail accounts found in emailproxy: ${ACCOUNTS[*]}"
 apt_install isync
 
 # ask once where each account's mail should live under /media/nas/Mail/
-if run_once "mbsync-mailbox-names"; then
+if run_once "write mbsync-mailbox-names to $MAPS_FILE"; then
   mkdir -p "$(dirname "$MAPS_FILE")"
   : > "$MAPS_FILE.tmp"
   for a in "${ACCOUNTS[@]}"; do
@@ -174,7 +174,7 @@ EOF
 }
 
 if build_mbsyncrc | write_file 644 "$MBSYNCRC"; then
-  if [ "${DRY_RUN:-0}" != "1" ] && run_once "mbsync-initial-sync"; then
+  if [ "${DRY_RUN:-0}" != "1" ] && run_once "mbsync -c $MBSYNCRC"; then
     echo "  First sync: enter any passwords emailproxy asks for."
     mbsync -c "$MBSYNCRC" -a || warn "initial sync failed (is emailproxy running?)"
   fi
