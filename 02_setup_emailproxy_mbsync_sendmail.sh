@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # 02_setup_emailproxy_mbsync_sendmail.sh
 # - install uv (system-wide) and emailproxy (under /opt/emailproxy)
-# - systemd service: emailproxy --no-gui at boot
-# - interactive: add your mail accounts to emailproxy's config
+# - systemd service: emailproxy --no-gui at boot, using OUR config file
+# - interactive: add your mail accounts to emailproxy's config file.
+#   $EP_ACCOUNTS uses emailproxy's own config format (emailproxy.config):
+#     [IMAP-1993] / [POP-1995] / [SMTP-1587]  -> local listener + upstream server
+#     [you@example.com]                       -> one section per mail account
+#   Everything below is driven by that file: accounts, local ports, TLS mode.
 # - when the account set changes: OAuth via emailproxy --external-auth
-#   (service stopped, proxy in foreground, one account at a time:
-#    self-send trigger -> surface OAuth URL -> paste redirect URL back)
+#   (service stopped, proxy runs in the foreground and prompts you itself;
+#    one IMAP login per account is triggered, accepted login == token acquired)
 # - mbsync pulling via emailproxy into /media/nas/Mail/<MAILBOX> (down only)
 # - weekly cron for mbsync (skips when /media/nas is not mounted)
 # - sendmail via msmtp + msmtp-mta, relaying through emailproxy's SMTP port
@@ -16,12 +20,42 @@ source ./lib.sh
 PPREFIX=/opt
 PREFIX="$PPREFIX/emailproxy"
 EP_BIN="$PREFIX/bin/emailproxy"
-EP_ACCOUNTS="$PREFIX/accounts.ini"
-EP_CFG="$PREFIX/config.cfg"
+EP_ACCOUNTS="$PREFIX/accounts.ini"           # emailproxy's OWN config file
+EP_ACCOUNTS_VIEW=$(drify "$EP_ACCOUNTS")     # where an existing one is read from
+EP_TOOL="$PWD/02_emailproxy.py"              # ini reader + login-trigger helper
 MBSYNCRC="$NASRPI_ETC_DIR/mbsyncrc"
+MSMTPRC="$NASRPI_ETC_DIR/msmtprc"
+MSMTPRC_VIEW=$(drify "$NASRPI_ETC_DIR/msmtprc")
 MAPS_FILE=$(drify "$PREFIX/.nasrpi-mailmaps")   # our "account -> folder" mapping
 
+# Fallbacks, used only if the config declares no [IMAP-n]/[SMTP-n] sections.
+IMAP_HOST=127.0.0.1
+SMTP_HOST=127.0.0.1
+IMAP_PORT=1993
+SMTP_PORT=1587
+IMAP_TLS=off
+SMTP_TLS=off
+EP_AUTH_TRIES=3          # login attempts per account during the OAuth flow
+
 say "02 - emailproxy + mbsync + sendmail"
+
+# --- python (to read emailproxy's ini config) ----------------------------------
+EP_PY=""
+find_python() {
+  local cand
+  for cand in python3 python3.13 python3.12 python3.11 python; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    if "$cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then
+      EP_PY=$(command -v "$cand"); return 0
+    fi
+  done
+  return 1
+}
+if ! find_python; then
+  apt_install python3
+  find_python || die "python3 (>= 3.8) is required to read emailproxy's config file."
+fi
+ok "using $EP_PY for the emailproxy config helper"
 
 # --- uv -----------------------------------------------------------------------
 if command -v uv >/dev/null; then
@@ -62,7 +96,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$EP_BIN --no-gui
+ExecStart=$EP_BIN --no-gui --config-file $EP_ACCOUNTS
 Restart=on-failure
 RestartSec=10
 
@@ -76,132 +110,202 @@ EOF
   fi
 fi
 
-# --- let the user configure their accounts -------------------------------------
-if [ "${DRY_RUN:-0}" != "1" ] && [ ! -f "$EP_ACCOUNTS" ] && [ -x "$EP_BIN" ]; then
-  echo "  Starting emailproxy briefly so it can create its default config..."
-  timeout 20 "$EP_BIN" --no-gui >/dev/null 2>&1 || true
-fi
-if run_once "edit emailproxy $EP_ACCOUNTS"; then
-  echo "  Add your Gmail / Outlook / whatever accounts in the editor."
-  echo "  (emailproxy's local IMAP/SMTP port defaults to 1143.)"
-  sleep 5
-  [ "${DRY_RUN:-0}" != "1" ] && edit_file "$EP_ACCOUNTS" "sudo"
-  if confirm "Accounts added -- restart emailproxy now?"; then
-    [ "${DRY_RUN:-0}" != "1" ] && systemctl restart emailproxy.service
+# --- emailproxy's config file (your accounts live here) ------------------------
+if [ ! -f "$EP_ACCOUNTS_VIEW" ] || run_once "edit emailproxy accounts in $EP_ACCOUNTS"; then
+  if [ ! -f "$EP_ACCOUNTS_VIEW" ]; then
+    echo "  Creating $EP_ACCOUNTS (emailproxy's own config format)."
+    "$EP_PY" "$EP_TOOL" template | write_file 600 "$EP_ACCOUNTS" "sudo" || warn "kept existing config"
+  fi
+  if [ "${DRY_RUN:-0}" != "1" ]; then
+    echo "  Add your Gmail / Outlook / whatever accounts to $EP_ACCOUNTS."
+    echo "  Each account needs: permission_url, token_url, oauth2_scope, client_id"
+    echo "  (commented Outlook + Gmail examples are in that file)."
+    sleep 2
+    edit_file "$EP_ACCOUNTS" "sudo"
   fi
 fi
 
-# --- discover configured upstream mailers ---------------------------------------
-# accounts.ini looks like:  [some_name.imap] / [some_name.smtp]
-list_accounts() {
-  local f
-  for f in "$EP_ACCOUNTS" "$EP_CFG"; do
-    if [ -f "$f" ]; then
-      grep -hoE '^\[[^][.]++\.(imap|smtp)\]' "$f" 2>/dev/null \
-        | tr -d '[]' | sed -E 's/\.(imap|smtp)$//' | sort -u
+# --- read that config file -----------------------------------------------------
+# Accounts = sections whose heading is an e-mail address and that have a token_url;
+# local ports come from the [IMAP-1993] / [SMTP-1587] style server sections.
+EP_ERR=$(mktemp)
+ep_rc=0
+ACCOUNTS=()
+# --all: also REPORT the shipped sample/placeholder sections (they stay ignored)
+ACCOUNTS_OUT=$("$EP_PY" "$EP_TOOL" accounts "$EP_ACCOUNTS_VIEW" --all 2>"$EP_ERR") || ep_rc=$?
+if [ -s "$EP_ERR" ]; then
+  while IFS= read -r line; do warn "${line#\# }"; done < "$EP_ERR"
+fi
+case "$ep_rc" in
+  0) while IFS= read -r acct_line; do
+       if [ -n "$acct_line" ]; then ACCOUNTS+=("$acct_line"); fi
+     done <<<"$ACCOUNTS_OUT" ;;
+  3) warn "No configured accounts in $EP_ACCOUNTS (sample/placeholder entries are ignored)." ;;
+  *) warn "Could not read $EP_ACCOUNTS." ;;
+esac
+if [ "${DRY_RUN:-0}" = "1" ] && [ "${#ACCOUNTS[@]}" -eq 0 ]; then
+  ACCOUNTS=(demo_account)                       # fixture for script testing only
+  warn "DRY_RUN: using fake account demo_account"
+fi
+if [ "${#ACCOUNTS[@]}" -eq 0 ]; then
+  warn "Add accounts to $EP_ACCOUNTS, then rerun this script to set up mbsync/sending."
+  exit 0
+fi
+say "Mail accounts in emailproxy config: ${ACCOUNTS[*]}"
+
+ep_catchall=$("$EP_PY" "$EP_TOOL" catchall "$EP_ACCOUNTS_VIEW" 2>/dev/null || echo False)
+if [ "$ep_catchall" = "True" ]; then
+  warn "allow_catch_all_accounts is on: accounts the proxy creates on the fly are not"
+  warn "seen here -- rerun 02 after new accounts show up in $EP_ACCOUNTS."
+fi
+
+# --- local proxy endpoints, from the config's server sections ------------------
+IMAP_PORT_SET=""; SMTP_PORT_SET=""; POP_PORT=""
+read_proxy_servers() {
+  local proto port host local_tls server_tls
+  while IFS=$'\t' read -r proto port host local_tls server_tls; do
+    case "$proto" in
+      IMAP) if [ -z "$IMAP_PORT_SET" ]; then
+              IMAP_PORT=$port; IMAP_HOST=$host; IMAP_TLS=$local_tls; IMAP_PORT_SET=1
+            fi ;;
+      SMTP) if [ -z "$SMTP_PORT_SET" ]; then
+              SMTP_PORT=$port; SMTP_HOST=$host; SMTP_TLS=$local_tls; SMTP_PORT_SET=1
+            fi ;;
+      POP)  POP_PORT=$port ;;
+    esac
+  done < <("$EP_PY" "$EP_TOOL" servers "$EP_ACCOUNTS_VIEW" 2>/dev/null || true)
+  if [ -n "$POP_PORT" ]; then
+    warn "POP3 listener on $POP_PORT in the proxy config -- nasrpi syncs via IMAP only."
+  fi
+  if [ -z "$IMAP_PORT_SET" ]; then
+    warn "No [IMAP-<port>] server in $EP_ACCOUNTS -- assuming $IMAP_HOST:$IMAP_PORT."
+  fi
+  if [ -z "$SMTP_PORT_SET" ]; then
+    warn "No [SMTP-<port>] server in $EP_ACCOUNTS -- assuming $SMTP_HOST:$SMTP_PORT."
+  fi
+}
+read_proxy_servers
+say "emailproxy local endpoints: IMAP $IMAP_HOST:$IMAP_PORT (tls $IMAP_TLS), SMTP $SMTP_HOST:$SMTP_PORT (tls $SMTP_TLS)"
+if [ "$IMAP_TLS" = "on" ] || [ "$SMTP_TLS" = "on" ]; then
+  warn "local_starttls is enabled in the proxy config: mbsync/msmtp are set to STARTTLS"
+  warn "-- make sure the proxy's local certificate is trusted by them."
+fi
+
+# --- the local proxy login password --------------------------------------------
+# The proxy authenticates upstream with OAuth 2.0; this password is only used
+# locally (mbsync/msmtp -> proxy) and to encrypt the cached tokens, so a single
+# shared value for all accounts keeps things simple (see the sample config notes).
+EP_PASSWORD=""
+if [ -f "$MSMTPRC_VIEW" ]; then
+  EP_PASSWORD=$(grep -m1 '^password ' "$MSMTPRC_VIEW" 2>/dev/null | cut -d' ' -f2-) || true
+fi
+if [ -z "$EP_PASSWORD" ] || confirm "Proxy login password on record. Re-enter it?"; then
+  echo "  Local emailproxy login password (any value; it protects cached tokens)."
+  read -r -s -p "  Password (empty = clients connect without AUTH): " EP_PASSWORD || EP_PASSWORD=""
+  echo
+fi
+
+# --- OAuth external authentication (when the account set changes) --------------
+# emailproxy only needs a token when a client logs in, and in
+# `--no-gui --external-auth` mode it prints the OAuth URL and prompts for the
+# post-authentication URL itself (which needs a real terminal). So: stop the
+# service, run the proxy in the FOREGROUND attached to this terminal, trigger one
+# IMAP login per account in the background, and treat "login accepted" (helper
+# exit 0) as "this account has a working token".
+EP_ACCTS_STATE="${NASRPI_STATE:-$HOME/.nasrpi-state}.emailproxy-accounts"
+EP_LOG=""
+ep_pid=""
+
+auth_trigger() {  # $1 = account; exit 0 once emailproxy accepts the login
+  "$EP_PY" "$EP_TOOL" imap-login --host "$IMAP_HOST" --port "$IMAP_PORT" \
+    --user "$1" --password "$EP_PASSWORD"
+}
+
+show_auth_url() {  # $1 = account: highlight the OAuth URL once the proxy logs it
+  local acct=$1 end=$((SECONDS + 25)) url
+  while (( SECONDS < end )); do
+    url=$(grep -F "to authenticate account $acct:" "$EP_LOG" 2>/dev/null \
+            | grep -oE 'https?://[^[:space:]]+' | tail -1)
+    if [ -n "$url" ]; then
+      echo
+      echo "  ==== $acct: sign in at this URL (emailproxy shows it above too) ===="
+      echo "       $url"
+      echo "  ...then paste the final (non-loading) browser URL into emailproxy's prompt."
       return 0
     fi
+    sleep 1
   done
   return 1
 }
-ACCOUNTS=()
-if [ "${DRY_RUN:-0}" = "1" ]; then
-  ACCOUNTS=(demo_account)                       # for testing the scripts only
-else
-  while read -r a; do [ -n "$a" ] && ACCOUNTS+=("$a"); done < <(list_accounts)
-fi
-if [ "${#ACCOUNTS[@]}" -eq 0 ]; then
-  warn "No mail accounts found in emailproxy config yet."
-  warn "Add them (rerun this script, edit $EP_ACCOUNTS), then rerun for mbsync."
-  exit 0
-fi
-say "Mail accounts found in emailproxy: ${ACCOUNTS[*]}"
 
-# --- OAuth external authentication (whenever the account set changes) -------------
-# With --external-auth, emailproxy prints an OAuth URL to its output when no
-# valid token exists, then waits for the redirect URL to be pasted back on
-# stdin. So: stop the systemd service, run emailproxy in the foreground
-# (attached, output streamed), trigger one self-addressed send per account in
-# the background, surface the URL for the browser, paste the token/redirect back.
-EP_ACCTS_STATE="${NASRPI_STATE:-$HOME/.nasrpi-state}.emailproxy-accounts"
-
-auth_trigger() {  # force upstream activity for account $1, to make emailproxy need a token
-  # NOTE: if your accounts.ini defines local client passwords, msmtp must
-  # authenticate -- add --password=... here or use /etc/msmtprc profiles.
-  { echo "To: $1"; echo "Subject: nasrpi auth trigger"; echo; echo "trigger"; } \
-    | msmtp --host 127.0.0.1 --port 1143 --from "$1" --user "$1" "$1"
+ep_stop_service() {
+  [ "${DRY_RUN:-0}" = "1" ] && return 0
+  warn "Stopping emailproxy.service (the foreground proxy needs this terminal)"
+  systemctl stop emailproxy.service
 }
 
-EP_LINE=""
-ep_read_until() {  # $1 = ERE pattern, $2 = timeout secs; streams proxy output meanwhile
-  local pat=$1 end=$((SECONDS + $2)) rc=1
-  local line
-  while (( SECONDS < end )); do
-    if IFS= read -r -t 1 -u "$EP_OUT_FD" line; then
-      echo "  [emailproxy] $line"
-      if printf '%s\n' "$line" | grep -qE "$pat"; then
-        EP_LINE=$line; rc=0; break
-      fi
-    fi
-  done
-  return $rc
+ep_restore_service() {
+  [ "${DRY_RUN:-0}" = "1" ] && return 0
+  if [ -n "$ep_pid" ]; then
+    kill "$ep_pid" 2>/dev/null || true
+    wait "$ep_pid" 2>/dev/null || true
+    ep_pid=""
+  fi
+  if systemctl start emailproxy.service 2>/dev/null; then
+    ok "emailproxy.service restored"
+  else
+    warn "could not start emailproxy.service -- start it manually"
+  fi
 }
 
 external_auth_flow() {  # $@ = accounts to (re)authenticate
-  local acct pasted url
-  say "OAuth external-authentication for: $*"
+  local accts=("$@") acct attempt rc trigger_pid
+  say "OAuth external-authentication for: ${accts[*]}"
   if [ "${DRY_RUN:-0}" = "1" ]; then
-    warn "DRY_RUN: would stop the emailproxy service, run it with --external-auth"
-    warn "DRY_RUN: in the foreground, self-send per account, surface the OAuth URL"
-    warn "DRY_RUN: and forward your pasted redirect URL back to the proxy."
+    warn "DRY_RUN: would stop emailproxy.service, run emailproxy --external-auth in"
+    warn "DRY_RUN: this terminal (it shows the OAuth URL and takes your pasted URL),"
+    warn "DRY_RUN: triggering an IMAP login per account until it is accepted."
     return 0
   fi
 
-  warn "emailproxy.service is stopped during this flow (foreground emailproxy owns stdin/stdout)"
-  systemctl stop emailproxy.service
+  EP_LOG=$(mktemp /tmp/nasrpi-emailproxy-auth.XXXXXX)
+  ep_stop_service
+  trap 'ep_restore_service' EXIT INT
 
-  # foreground proxy, attached: its output streams to us, its stdin we write to
-  coproc EP { "$EP_BIN" --no-gui --external-auth 2>&1; }
-  local EP_OUT_FD=${EP[0]}
+  warn "emailproxy runs in the foreground now and will prompt you directly."
+  warn "Sign in at the URL it shows, then paste the browser's final URL at its prompt. (Ctrl-C aborts)"
 
-  ep_read_until 'istening|roxying|arted' 30 \
-    || warn "emailproxy did not report listening within 30s -- continuing anyway"
+  # stdin stays attached to this terminal (emailproxy needs a tty for this mode);
+  # output is tee'd here so we can point at the URL it logs.
+  "$EP_BIN" --no-gui --external-auth --config-file "$EP_ACCOUNTS" > >(tee "$EP_LOG") 2>&1 &
+  ep_pid=$!
+  sleep 3                                  # let the proxy bind its local ports
 
-  for acct in "$@"; do
-    say "Account: $acct -- triggering self-addressed test mail (background)..."
-    ( sleep 2; auth_trigger "$acct" ) &   # if no token: proxy prints auth URL next
-    url=""
-    if ep_read_until 'https?://' 30; then
-      url=$(printf '%s\n' "$EP_LINE" | grep -oE 'https?://[^[:space:]]+' | head -1)
-      echo
-      echo "  ==== authentication needed for $acct ===="
-      echo "  1) open this URL in your browser:"
-      echo
-      echo "       $url"
-      echo
-      echo "  2) sign in; the browser ends on a redirect URL that will not load"
-      echo "  3) copy the FULL final URL from the address bar and paste it here"
-      IFS= read -r -p "  pasted URL (empty = skip): " pasted < /dev/tty
-      if [ -n "$pasted" ]; then
-        printf '%s\n' "$pasted" >&"${EP[1]}"
-        ep_read_until 'uthentication (completed|complete|success)|okens? (acquired|refreshed)|received' 90 \
-          || warn "no clear completion message for $acct -- check the streamed output above"
-        ok "auth exchange completed for $acct"
+  for acct in "${accts[@]}"; do
+    attempt=1; rc=1
+    while (( attempt <= EP_AUTH_TRIES )) && kill -0 "$ep_pid" 2>/dev/null; do
+      say "Account $acct (attempt $attempt/$EP_AUTH_TRIES): logging in through the proxy"
+      auth_trigger "$acct" &
+      trigger_pid=$!
+      show_auth_url "$acct" || true              # convenience echo; the prompt is emailproxy's
+      if wait "$trigger_pid"; then rc=0; else rc=$?; fi
+      if [ "$rc" -eq 0 ]; then
+        ok "$acct: login accepted -- OAuth token in place"
+        break
+      elif [ "$rc" -eq 4 ]; then
+        warn "$acct: login refused (attempt $attempt) -- did the browser flow finish?"
       else
-        warn "skipped $acct"
+        warn "$acct: could not complete a login through the proxy (exit $rc)"
       fi
-    else
-      ok "no auth URL for $acct within 30s -- token still valid, nothing to do"
-    fi
+      attempt=$((attempt + 1))
+      sleep 3
+    done
+    [ "$rc" -eq 0 ] || warn "Giving up on $acct for now -- rerun 02 to retry its OAuth flow."
   done
 
-  kill "$EP_PID" 2>/dev/null || true
-  wait "$EP_PID" 2>/dev/null || true
-  systemctl start emailproxy.service
-  ok "emailproxy.service restored"
+  ep_restore_service
 }
 
-# run the flow only when the configured account set actually changed
 EP_ACCTS_CUR=$(printf '%s\n' "${ACCOUNTS[@]}" | sort)
 EP_ACCTS_PREV=""
 [ -f "$EP_ACCTS_STATE" ] && EP_ACCTS_PREV=$(cat "$EP_ACCTS_STATE")
@@ -215,13 +319,24 @@ fi
 apt_install isync
 
 # ask once where each account's mail should live under /media/nas/Mail/
+default_folder() {  # tim.felgentreff@oracle.com -> oracle ; fallback: whole address
+  local a=$1 d=${1##*@}
+  d=${d%%.*}
+  if printf '%s' "$d" | grep -qE '^[A-Za-z][A-Za-z0-9_-]*$'; then
+    printf '%s\n' "$d"
+  else
+    printf '%s\n' "$a" | tr -c 'A-Za-z0-9_-' '_'
+  fi
+}
+
 if run_once "write mbsync-mailbox-names to $MAPS_FILE"; then
-  mkdir -p "$(dirname "$MAPS_FILE")"
   : > "$MAPS_FILE.tmp"
   for a in "${ACCOUNTS[@]}"; do
-    d=$(derive_name "$a")
-    read -r -p "  Mail folder name for '$a' [${d}]: " custom || custom=""
-    echo "${a}=${custom:-$d}" >> "$MAPS_FILE.tmp"
+    d=$(default_folder "$a")
+    n=$d; i=2
+    while grep -q "=$n\$" "$MAPS_FILE.tmp" 2>/dev/null; do n="${d}-$i"; i=$((i+1)); done
+    read -r -p "  Mail folder name for '$a' [${n}]: " custom || custom=""
+    echo "${a}=${custom:-$n}" >> "$MAPS_FILE.tmp"
   done
   mkdir -p "$(dirname "$MAPS_FILE")" && mv "$MAPS_FILE.tmp" "$MAPS_FILE"
   ok "saved folder mapping to $MAPS_FILE (edit that file any time)"
@@ -229,26 +344,31 @@ fi
 
 folder_for() {  # stored folder name for an account, fresh default if unmapped
   local m=""
-  [ -f "$MAPS_FILE" ] && m=$(grep -m1 "^$1=" "$MAPS_FILE" | cut -d= -f2-)
-  echo "${m:-$(derive_name "$1")}"
+  [ -f "$MAPS_FILE" ] && m=$(grep -m1 -- "^$1=" "$MAPS_FILE" | cut -d= -f2-)
+  echo "${m:-$(default_folder "$1")}"
 }
 
 build_mbsyncrc() {
   echo "# Managed by nasrpi setup scripts."
-  echo "# Accounts live in emailproxy's config; rerun 02 after changing them."
-  local a name dest
+  echo "# Accounts live in emailproxy's config ($EP_ACCOUNTS); rerun 02 after changing them."
+  local a name dest imap_ssl
+  imap_ssl=$([ "$IMAP_TLS" = "on" ] && echo STARTTLS || echo None)
   for a in "${ACCOUNTS[@]}"; do
-    name=$(echo "$a" | tr ' ' _)          # mbsync names must not contain spaces
+    name=$(printf '%s' "$a" | tr -c 'A-Za-z0-9_-' '_')   # mbsync-safe name
     dest=$(folder_for "$a")
     cat <<EOF
 
-# ---- $a (via emailproxy) ----
+# ---- $a (via emailproxy $IMAP_HOST:$IMAP_PORT) ----
 IMAPAccount $name
-Host 127.0.0.1
-Port 1143
+Host $IMAP_HOST
+Port $IMAP_PORT
 User $a
-Pass *
-SSLType STARTTLS
+# emailproxy's local login password (see 02); '*' would prompt -> cron would fail.
+Pass ${EP_PASSWORD:-*}
+AuthMechs LOGIN
+# The proxy talks plain text locally and does the upstream TLS itself;
+# STARTTLS only when the proxy config sets local_starttls = True.
+SSLType $imap_ssl
 
 IMAPStore $name-remote
 Account $name
@@ -271,7 +391,8 @@ EOF
   done
 }
 
-if build_mbsyncrc | write_file 644 "$MBSYNCRC"; then
+# holds the local proxy password -> keep it root-only
+if build_mbsyncrc | write_file 600 "$MBSYNCRC" "sudo"; then
   if [ "${DRY_RUN:-0}" != "1" ] && run_once "mbsync -c $MBSYNCRC"; then
     echo "  First sync (tokens acquired via the external-auth flow above)."
     mbsync -c "$MBSYNCRC" -a || warn "initial sync failed (is emailproxy running?)"
@@ -279,7 +400,7 @@ if build_mbsyncrc | write_file 644 "$MBSYNCRC"; then
 fi
 
 # --- weekly mbsync cron (down only, skips when nas not mounted) -----------------
-cat <<'EOF' | write_file 755 /usr/local/bin/nasrpi-mail-sync.sh
+cat <<'EOF' | write_file 755 /usr/local/bin/nasrpi-mail-sync.sh "sudo"
 #!/bin/sh
 # nasrpi: weekly mail pull via emailproxy (down only).
 mountpoint -q /media/nas || exit 0   # skip when target not mounted
@@ -290,7 +411,7 @@ install_cron nasrpi-mail "$MAIL_DOW $MAIL_HOUR $MAIL_MIN" \
   "/usr/local/bin/nasrpi-mail-sync.sh"
 
 # --- sendmail: msmtp (+ msmtp-mta) relaying through emailproxy --------------------
-say "sendmail: outgoing mail via msmtp -> emailproxy SMTP (localhost:1143)"
+say "sendmail: outgoing mail via msmtp -> emailproxy SMTP ($SMTP_HOST:$SMTP_PORT)"
 apt_install msmtp msmtp-mta   # msmtp-mta provides /usr/sbin/sendmail for all tools
 smtp_account=${ACCOUNTS[0]}
 if [ "${#ACCOUNTS[@]}" -gt 1 ] && [ "${DRY_RUN:-0}" != "1" ]; then
@@ -305,32 +426,29 @@ else
 fi
 # msmtp reads /etc/msmtprc system-wide (msmtp-mta wires it to sendmail).
 # Note: a personal ~/.msmtprc would override this file -- avoid one for root.
-MSMTPRC="$NASRPI_ETC_DIR/msmtprc"          # write_file() applies the dry-run shadow
-MSMTPRC_VIEW=$(drify "$NASRPI_ETC_DIR/msmtprc")   # where an existing file would be
-SMTP_PASS=""
-if [ ! -f "$MSMTPRC_VIEW" ] || confirm "Existing msmtp config found. Re-enter SMTP password/auth?"; then
-  read -r -p "  SMTP password for emailproxy (empty = no AUTH): " SMTP_PASS || SMTP_PASS=""
-fi
 build_msmtprc() {
   echo "# Managed by nasrpi setup scripts (02); rerun 02 to regenerate."
   echo "defaults"
-  echo "tls off"
+  # localhost <-> proxy is plain text; the proxy TLS-wraps the real upstream.
+  if [ "$SMTP_TLS" = "on" ]; then echo "tls starttls"; else echo "tls off"; fi
   echo
   echo "account emailproxy"
-  echo "host 127.0.0.1"
-  echo "port 1143"
+  echo "host $SMTP_HOST"
+  echo "port $SMTP_PORT"
   echo "from $smtp_account"
-  if [ -n "$SMTP_PASS" ]; then
+  if [ -n "$EP_PASSWORD" ]; then
     echo "auth on"
     echo "user $smtp_account"
-    echo "password $SMTP_PASS"
+    echo "password $EP_PASSWORD"
   else
     echo "auth off"
   fi
   echo
   echo "account default : emailproxy"
 }
-build_msmtprc | write_file 600 "$MSMTPRC" || warn "kept existing msmtp config"
+if [ ! -f "$MSMTPRC_VIEW" ] || confirm "Existing msmtp config found. Replace it?"; then
+  build_msmtprc | write_file 600 "$MSMTPRC" "sudo" || warn "kept existing msmtp config"
+fi
 if [ "${DRY_RUN:-0}" != "1" ]; then
   # sanity check: does it actually talk to emailproxy?
   if confirm "Send a test mail to $smtp_account to verify?"; then

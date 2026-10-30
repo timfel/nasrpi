@@ -26,18 +26,26 @@ picking disks by name/size, previews the fstab edit, and backs up fstab first.
 *** 02 — emailproxy, mbsync, sendmail
 
 - Installs ~uv~ + ~emailproxy~ under =/opt/emailproxy=, and creates a systemd
-  service named ~emailproxy~ that runs ~=--no-gui=~ at boot.
-- Lets you add Gmail/Outlook/... accounts to its config, then runs emailproxy's
-  ~=--external-auth=~ OAuth flow whenever the account set changes. The service is
-  stopped during OAuth; emailproxy runs in the foreground, triggers a
-  self-addressed test mail per account, prints the OAuth URL for your browser,
-  and prompts you to paste the redirect URL back into the terminal.
+  service named ~emailproxy~ that runs ~=--no-gui~ at boot, pointed at
+  =/opt/emailproxy/accounts.ini= via ~=--config-file~.
+- Seeds that file in *emailproxy's own config format* (same format as the
+  upstream =emailproxy.config= sample: accounts are =[you@example.com]= sections,
+  local listeners come from =[IMAP-1993]= / =[SMTP-1587]= style sections) and
+  opens it for you to add your Gmail / Outlook / ... accounts. Everything below
+  is read from that file: account list, local ports, TLS mode
+  (=02_emailproxy.py= does the ini parsing).
+- Runs emailproxy's ~=--external-auth=~ OAuth flow whenever the account set
+  changes: the service is stopped and emailproxy runs in the foreground (that
+  mode needs a real terminal) and prompts for the OAuth URL and the pasted
+  post-authentication URL itself, while 02 triggers one IMAP login per account —
+  login accepted means the token is in place.
 - Generates =/etc/mbsyncrc= to pull *down only* into
-  =/media/nas/Mail/<MAILBOX>=, and installs a weekly mbsync cron job that skips
-  when =/media/nas= is unmounted.
+  =/media/nas/Mail/<MAILBOX>= (one folder per account, you name them), and
+  installs a weekly mbsync cron job that skips when =/media/nas= is unmounted.
 - Sets up *msmtp* (plus ~msmtp-mta~, which provides =/usr/sbin/sendmail=) so
   every script, smartd and cron job sends mail through =/etc/msmtprc= →
-  emailproxy (~localhost:1143=) using the upstream mailer you pick.
+  emailproxy's local SMTP port (from its =[SMTP-<port>]= section, e.g.
+  ~localhost:1587~) using the upstream mailer you pick.
 
 *** 03 — smartmontools
 
@@ -95,16 +103,27 @@ when either mount is missing.
 ** Notes / gotchas
 
 - Needs Debian/Raspbian (~apt~) on the Pi; scripts exit cleanly elsewhere.
-- emailproxy asks for app passwords per account (Gmail needs an app password).
-  If ~mbsync~ complains about authentication, replace =Pass *= in
-  =/etc/mbsyncrc= with the literal password.
-- OAuth tokens: whenever the account list in emailproxy's config changes, 02
-  stops the service and runs ~emailproxy --external-auth~ attached to your
-  terminal, one account at a time (self-send trigger → open URL → paste the
-  browser's final redirect URL back). The change-detection key is
-  =~/.nasrpi-state.emailproxy-accounts=~ — delete it to force a full re-auth. If
-  your ~accounts.ini~ uses local client passwords, edit ~auth_trigger()~ at the
-  top of script 02 so the trigger mail authenticates.
+- Config source of truth: =/opt/emailproxy/accounts.ini= (emailproxy's own ini
+  format). Add an account section per address with =permission_url=,
+  =token_url=, =oauth2_scope=, =client_id= (Outlook and Gmail examples are
+  commented in the seeded file). Unconfigured sample sections that ship with
+  emailproxy (=*** your client id here ***=) are detected and ignored. Rerun 02
+  after edits to regenerate =/etc/mbsyncrc=, =/etc/msmtprc= and the cron jobs.
+- The password 02 asks for is the *local* proxy login password: mbsync/msmtp use
+  it to talk to emailproxy and emailproxy uses it to encrypt its cached OAuth
+  tokens; the real provider authentication is OAuth in the browser. It is stored
+  in =/etc/mbsyncrc= (=Pass ..., mode 600) and =/etc/msmtprc= so unattended sync
+  and =sendmail= work.
+- The proxy speaks plain text locally, so =mbsync= gets ~SSLType None~ and msmtp
+  gets ~tls off~; enable ~local_starttls~ in emailproxy's config and 02 writes
+  ~STARTTLS~ / ~tls starttls~ instead (then make the proxy's local certificate
+  trusted by mbsync/msmtp).
+- OAuth: whenever the account set changes, 02 stops the service and runs
+  ~emailproxy --external-auth~ attached to your terminal, triggering an IMAP
+  login per account until it is accepted. The change-detection key is
+  =~/.nasrpi-state.emailproxy-accounts=~ — delete it to force a re-auth.
+  Catch-all accounts (=[@domain.com]= with ~allow_catch_all_accounts~) are not
+  enumerable; rerun 02 when new ones show up.
 - Outgoing mail always goes through msmtp (=~/etc/msmtprc~, mode 600) via the
   ~sendmail~ compatibility shim from ~msmtp-mta~. If emailproxy requires no
   password for localhost, leave the password prompt empty (~auth off~). Beware:

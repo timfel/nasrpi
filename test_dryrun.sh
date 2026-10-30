@@ -71,23 +71,84 @@ check "reports already set up" "already set up" "$T/01b.out"
   || { echo "  FAIL: fstab changed on rerun"; fail=$((fail+1)); }
 
 echo "=== 02 emailproxy/mbsync/sendmail"
-# answers: service y, add-accounts y, restart y, mailbox-names y, folder=demo,
-#          dow=0 hour=3 min=15, cron-install y
-runtest02_input='y\ny\ny\ny\ndemo\n0\n3\n15\ny\n\n'   # last line: msmtp password (empty = auth off)
+# A realistic emailproxy config in the real emailproxy.config format:
+# [IMAP-n]/[SMTP-n] listeners, accounts as [addr] sections, plus the shipped
+# sample placeholders (which must be ignored).
+mkdir -p "$R/opt/emailproxy"
+cat > "$R/opt/emailproxy/accounts.ini" <<'CFG'
+[Email OAuth 2.0 Proxy configuration file]
+documentation = This is a sample Email OAuth 2.0 Proxy configuration file.
+	format = documented inline
+
+[Server setup]
+documentation = Local servers are specified as [IMAP-1993] etc.
+
+[IMAP-1993]
+documentation = *** note: this server works for Office 365 and personal Outlook ***
+server_address = imap.gmail.com
+server_port = 993
+local_address = 127.0.0.1
+
+[SMTP-1587]
+server_address = smtp-mail.outlook.com
+server_port = 587
+server_starttls = True
+local_address = 127.0.0.1
+
+[Account setup]
+documentation = Accounts are specified using your email address as the section heading.
+
+[tim.felgentreff@oracle.com]
+permission_url = https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+token_url = https://login.microsoftonline.com/common/oauth2/v2.0/token
+oauth2_scope = https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access
+redirect_uri = http://localhost
+client_id = 9e5f94bc-e8a4-4e73-b8be-63364c29d753
+
+[timfelgentreff@gmail.com]
+permission_url = https://accounts.google.com/o/oauth2/auth
+token_url = https://oauth2.googleapis.com/token
+oauth2_scope = https://mail.google.com/
+redirect_uri = http://localhost
+client_id = 406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com
+
+[your.email@fastmail.com]
+permission_url = https://api.fastmail.com/oauth/authorize
+token_url = https://api.fastmail.com/oauth/refresh
+oauth2_scope = https://www.fastmail.com/dev/protocol-imap
+client_id = *** your client id here ***
+
+[emailproxy]
+allow_catch_all_accounts = False
+CFG
+# answers: service y, edit-config y, proxy password, mailbox-names y,
+#          folder defaults (2 accounts), dow=0 hour=3 min=15, cron-install y
+runtest02_input='y\ny\nlocalproxy_pw\ny\n\n\n0\n3\n15\ny\n'
 runtest 02 "$runtest02_input" ./02_setup_emailproxy_mbsync_sendmail.sh
-check "systemd unit created"        "ExecStart=/opt/emailproxy/bin/emailproxy --no-gui" "$R/etc/systemd/system/emailproxy.service"
-check "mbsyncrc: account block"     "IMAPAccount demo_account" "$R/etc/mbsyncrc"
-check "mbsyncrc: via emailproxy"    "Port 1143"                "$R/etc/mbsyncrc"
-check "mbsyncrc: down only"         "Sync Pull"                      "$R/etc/mbsyncrc"
-check "mbsyncrc: chosen mail folder" "/media/nas/Mail/demo/"         "$R/etc/mbsyncrc"
-check "mail cron installed"         "nasrpi-mail-sync.sh"      "$R/etc/cron.d/nasrpi-mail"
-check "mail cron schedule"          "15 3 * * 0 root"          "$R/etc/cron.d/nasrpi-mail"
-check "mail sync skips unmounted"   "mountpoint -q /media/nas" "$R/usr/local/bin/nasrpi-mail-sync.sh"
-check "msmtprc: emailproxy account" "account emailproxy"          "$R/etc/msmtprc"
-check "msmtprc: via emailproxy"     "port 1143"                    "$R/etc/msmtprc"
-check "msmtprc: from account"       "from demo_account"          "$R/etc/msmtprc"
-check "msmtprc: default account"    "account default : emailproxy" "$R/etc/msmtprc"
-check "account-set state stored"  "demo_account"          "$NASRPI_STATE.emailproxy-accounts"
+check "systemd unit: our config file" "ExecStart=/opt/emailproxy/bin/emailproxy --no-gui --config-file /opt/emailproxy/accounts.ini" "$R/etc/systemd/system/emailproxy.service"
+check "accounts found from ini"    "tim.felgentreff@oracle.com" "$NASRPI_STATE.emailproxy-accounts"
+check "second account found"       "timfelgentreff@gmail.com"   "$NASRPI_STATE.emailproxy-accounts"
+check "sample entries reported"    "sample placeholder"          "$T/02.out"
+check "mbsyncrc: oracle account"   "IMAPAccount tim_felgentreff_oracle_com" "$R/etc/mbsyncrc"
+check "mbsyncrc: gmail account"    "IMAPAccount timfelgentreff_gmail_com"   "$R/etc/mbsyncrc"
+check "mbsyncrc: real user name"   "User tim.felgentreff@oracle.com"         "$R/etc/mbsyncrc"
+check "mbsyncrc: proxy imap port"  "Port 1993"                          "$R/etc/mbsyncrc"
+check "mbsyncrc: plain to proxy"   "SSLType None"                       "$R/etc/mbsyncrc"
+check "mbsyncrc: proxy password"   "Pass localproxy_pw"                "$R/etc/mbsyncrc"
+check "mbsyncrc: LOGIN auth"       "AuthMechs LOGIN"                    "$R/etc/mbsyncrc"
+check "mbsyncrc: down only"        "Sync Pull"                          "$R/etc/mbsyncrc"
+check "mbsyncrc: mail folder"      "/media/nas/Mail/oracle/"             "$R/etc/mbsyncrc"
+check "mail cron installed"        "nasrpi-mail-sync.sh"                "$R/etc/cron.d/nasrpi-mail"
+check "mail cron schedule"         "15 3 * * 0 root"                    "$R/etc/cron.d/nasrpi-mail"
+check "mail sync skips unmounted"  "mountpoint -q /media/nas"            "$R/usr/local/bin/nasrpi-mail-sync.sh"
+check "msmtprc: emailproxy account" "account emailproxy"                 "$R/etc/msmtprc"
+check "msmtprc: proxy smtp port"   "port 1587"                           "$R/etc/msmtprc"
+check "msmtprc: plain to proxy"    "tls off"                             "$R/etc/msmtprc"
+check "msmtprc: from account"      "from tim.felgentreff@oracle.com"     "$R/etc/msmtprc"
+check "msmtprc: proxy password"    "password localproxy_pw"              "$R/etc/msmtprc"
+check "msmtprc: default account"   "account default : emailproxy"        "$R/etc/msmtprc"
+check "oauth flow described"       "IMAP login per account"            "$T/02.out"
+check "msmtprc: auth on"           "auth on"                             "$R/etc/msmtprc"
 
 echo "=== 02 rerun: idempotent, no re-prompts"
 sum_before=$(md5sum "$R/etc/mbsyncrc")

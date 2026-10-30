@@ -126,9 +126,9 @@ apt_install() {
   "$NASRPI_SUDO" apt-get install "${missing[@]}"
 }
 
-# write_file MODE TARGET  ...content on stdin (idempotent: skips if identical)
+# write_file MODE TARGET [sudo]  ...content on stdin (idempotent: skips if identical)
 write_file() {
-  local mode=$1 target=$2 usesudo=$3 tmp target_cmp
+  local mode=$1 target=$2 usesudo=${3:-} tmp target_cmp
   # in DRY_RUN with a shadow root, compare/inspect the shadow copy instead
   if [ "${DRY_RUN:-0}" = "1" ] && [ -n "${NASRPI_DRY_ROOT:-}" ]; then
     target_cmp="$NASRPI_DRY_ROOT$target"
