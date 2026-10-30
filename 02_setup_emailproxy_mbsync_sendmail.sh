@@ -214,28 +214,52 @@ fi
 # exit 0) as "this account has a working token".
 EP_ACCTS_STATE="${NASRPI_STATE:-$HOME/.nasrpi-state}.emailproxy-accounts"
 EP_LOG=""
+EP_RESULT=""
 ep_pid=""
+ep_worker=""
 
 auth_trigger() {  # $1 = account; exit 0 once emailproxy accepts the login
   "$EP_PY" "$EP_TOOL" imap-login --host "$IMAP_HOST" --port "$IMAP_PORT" \
     --user "$1" --password "$EP_PASSWORD"
 }
 
-show_auth_url() {  # $1 = account: highlight the OAuth URL once the proxy logs it
-  local acct=$1 end=$((SECONDS + 25)) url
-  while (( SECONDS < end )); do
-    url=$(grep -F "to authenticate account $acct:" "$EP_LOG" 2>/dev/null \
-            | grep -oE 'https?://[^[:space:]]+' | tail -1)
-    if [ -n "$url" ]; then
-      echo
-      echo "  ==== $acct: sign in at this URL (emailproxy shows it above too) ===="
-      echo "       $url"
-      echo "  ...then paste the final (non-loading) browser URL into emailproxy's prompt."
-      return 0
+auth_worker() {  # $1 = pidfile; runs in the BACKGROUND while the proxy is in fg
+  local pidfile=$1 acct attempt line finished=0
+  shift
+  while [ ! -s "$pidfile" ]; do sleep 0.5; done
+  read -r ep_pid < "$pidfile"
+  sleep 3                                  # let the proxy bind its local ports
+  for acct in "$@"; do
+    [ "$finished" = 1 ] && break
+    attempt=1
+    while (( attempt <= EP_AUTH_TRIES )) && kill -0 "$ep_pid" 2>/dev/null; do
+      say "Account $acct (attempt $attempt/$EP_AUTH_TRIES): logging in through the proxy"
+      if line=$(auth_trigger "$acct" 2>&1); then
+        ok "$acct: login accepted -- OAuth token in place"
+        echo "ok $acct" >> "$EP_RESULT"
+        break
+      else
+        printf '%s\n' "$line" | while IFS= read -r l; do warn "  $l"; done
+        warn "$acct: login not accepted (attempt $attempt/$EP_AUTH_TRIES) -- retrying"
+      fi
+      attempt=$((attempt + 1))
+      sleep 3
+    done
+    if ! kill -0 "$ep_pid" 2>/dev/null; then
+      warn "proxy is no longer running (see its output above) -- aborting OAuth flow"
+      echo "failed $acct" >> "$EP_RESULT"
+      for acct in "$@"; do grep -qF "$acct" "$EP_RESULT" || echo "skipped $acct" >> "$EP_RESULT"; done
+      finished=1
+    elif [ "$attempt" -gt "$EP_AUTH_TRIES" ]; then
+      echo "failed $acct" >> "$EP_RESULT"
+      # everything else would just hang on a proxy that won't accept logins
+      for acct in "$@"; do grep -qF "$acct" "$EP_RESULT" || echo "skipped $acct" >> "$EP_RESULT"; done
+      finished=1
     fi
-    sleep 1
   done
-  return 1
+  # all accounts handled: stop the foreground proxy so the script can continue
+  echo "done" >> "$EP_RESULT"
+  kill -INT "$ep_pid" 2>/dev/null || true
 }
 
 ep_stop_service() {
@@ -244,8 +268,23 @@ ep_stop_service() {
   systemctl stop emailproxy.service
 }
 
+ep_report_results() {
+  [ -f "$EP_RESULT" ] || return 0
+  while read -r st acct; do
+    case "$st" in
+      failed)  warn "$acct: OAuth flow did not complete -- rerun 02 to retry" ;;
+      skipped) warn "$acct: skipped (an earlier account failed) -- rerun 02" ;;
+    esac
+  done < "$EP_RESULT"
+}
+
 ep_restore_service() {
   [ "${DRY_RUN:-0}" = "1" ] && return 0
+  if [ -n "$ep_worker" ]; then
+    kill "$ep_worker" 2>/dev/null || true
+    wait "$ep_worker" 2>/dev/null || true
+    ep_worker=""
+  fi
   if [ -n "$ep_pid" ]; then
     kill "$ep_pid" 2>/dev/null || true
     wait "$ep_pid" 2>/dev/null || true
@@ -259,7 +298,7 @@ ep_restore_service() {
 }
 
 external_auth_flow() {  # $@ = accounts to (re)authenticate
-  local accts=("$@") acct attempt rc trigger_pid
+  local accts=("$@")
   say "OAuth external-authentication for: ${accts[*]}"
   if [ "${DRY_RUN:-0}" = "1" ]; then
     warn "DRY_RUN: would stop emailproxy.service, run emailproxy --external-auth in"
@@ -269,50 +308,45 @@ external_auth_flow() {  # $@ = accounts to (re)authenticate
   fi
 
   EP_LOG=$(mktemp /tmp/nasrpi-emailproxy-auth.XXXXXX)
+  EP_RESULT=$(mktemp /tmp/nasrpi-emailproxy-result.XXXXXX)
   ep_stop_service
   trap 'ep_restore_service' EXIT INT
 
   warn "emailproxy runs in the foreground now and will prompt you directly."
   warn "Sign in at the URL it shows, then paste the browser's final URL at its prompt. (Ctrl-C aborts)"
 
-  # stdin stays attached to this terminal (emailproxy needs a tty for this mode);
-  # output is tee'd here so we can point at the URL it logs.
-  "$EP_BIN" --no-gui --external-auth --config-file "$EP_ACCOUNTS" > >(tee "$EP_LOG") 2>&1 &
-  ep_pid=$!
-  sleep 3                                  # let the proxy bind its local ports
+  # emailproxy must own this terminal: as a background job bash would give it
+  # /dev/null on stdin ("Input is not a terminal") and the auth prompt dies.
+  # So the proxy stays in the FOREGROUND and the IMAP login triggers run in a
+  # background worker, which stops the proxy (SIGINT) once every account is done.
+  ep_pidfile=$(mktemp /tmp/nasrpi-emailproxy-pid.XXXXXX)
+  auth_worker "$ep_pidfile" "${accts[@]}" &
+  ep_worker=$!
 
-  for acct in "${accts[@]}"; do
-    attempt=1; rc=1
-    while (( attempt <= EP_AUTH_TRIES )) && kill -0 "$ep_pid" 2>/dev/null; do
-      say "Account $acct (attempt $attempt/$EP_AUTH_TRIES): logging in through the proxy"
-      auth_trigger "$acct" &
-      trigger_pid=$!
-      show_auth_url "$acct" || true              # convenience echo; the prompt is emailproxy's
-      if wait "$trigger_pid"; then rc=0; else rc=$?; fi
-      if [ "$rc" -eq 0 ]; then
-        ok "$acct: login accepted -- OAuth token in place"
-        break
-      elif [ "$rc" -eq 4 ]; then
-        warn "$acct: login refused (attempt $attempt) -- did the browser flow finish?"
-      else
-        warn "$acct: could not complete a login through the proxy (exit $rc)"
-      fi
-      attempt=$((attempt + 1))
-      sleep 3
-    done
-    [ "$rc" -eq 0 ] || warn "Giving up on $acct for now -- rerun 02 to retry its OAuth flow."
-  done
+  # left side of the pipe: subshell writes its pid, then exec's the proxy.
+  # stdin is untouched (still this tty), stdout goes through tee into EP_LOG.
+  # ($BASHPID, not $$: inside a subshell $$ is still the parent script's pid)
+  ( echo "${BASHPID:-$$}" > "$ep_pidfile"; exec "$EP_BIN" --no-gui --external-auth --config-file "$EP_ACCOUNTS" ) 2>&1 | tee "$EP_LOG"
 
-  ep_restore_service
+  ep_report_results
+  wait "$ep_worker" 2>/dev/null || true
+  ep_worker=""
+  local flow_rc=0        # 0 = every account authenticated -> record the account set
+  grep -qE '^(failed|skipped) ' "$EP_RESULT" 2>/dev/null && flow_rc=1
+  rm -f "$ep_pidfile" "$EP_RESULT"
+  return "$flow_rc"
 }
 
 EP_ACCTS_CUR=$(printf '%s\n' "${ACCOUNTS[@]}" | sort)
 EP_ACCTS_PREV=""
 [ -f "$EP_ACCTS_STATE" ] && EP_ACCTS_PREV=$(cat "$EP_ACCTS_STATE")
 if [ "$EP_ACCTS_CUR" != "$EP_ACCTS_PREV" ]; then
-  external_auth_flow "${ACCOUNTS[@]}"
-  printf '%s\n' "$EP_ACCTS_CUR" > "$EP_ACCTS_STATE"
-  ok "account set recorded ($EP_ACCTS_STATE) -- external-auth flow reruns only on change"
+  if external_auth_flow "${ACCOUNTS[@]}"; then
+    printf '%s\n' "$EP_ACCTS_CUR" > "$EP_ACCTS_STATE"
+    ok "account set recorded ($EP_ACCTS_STATE) -- external-auth flow reruns only on change"
+  else
+    warn "account set NOT recorded: some accounts still need OAuth -- rerun 02 to retry."
+  fi
 fi
 
 # --- mbsync ----------------------------------------------------------------------
