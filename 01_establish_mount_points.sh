@@ -123,7 +123,7 @@ if [ "${DRY_RUN:-0}" = "1" ] && [ -z "${NASRPI_DRY_ROOT:-}" ]; then
 else
   mkdir -p "$(dirname "$NASRPI_FSTAB")"
   if [ -f "$NASRPI_FSTAB" ]; then
-    cp "$NASRPI_FSTAB" "$NASRPI_FSTAB.nasrpi.bak.$(date +%Y%m%d%H%M%S)"
+    "$NASRPI_SUDO" cp "$NASRPI_FSTAB" "$NASRPI_FSTAB.nasrpi.bak.$(date +%Y%m%d%H%M%S)"
     ok "backup saved as $NASRPI_FSTAB.nasrpi.bak.*"
   fi
   echo "$new_lines" >> "$NASRPI_FSTAB"

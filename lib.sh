@@ -15,6 +15,12 @@ NASRPI_DOW="${NASRPI_DOW:-0}"       # cron day of week: 0=Sunday .. 6=Saturday
 NASRPI_HOUR="${NASRPI_HOUR:-3}"
 NASRPI_MIN="${NASRPI_MIN:-15}"
 
+if [ "${DRY_RUN:-0}" = "1" ] || [ -n "${NASRPI_DRY_ROOT:-}" ]; then
+  NASRPI_SUDO=""
+else
+  NASRPI_SUDO="sudo"
+fi
+
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m  [ok]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m  [!!]\033[0m %s\n' "$*"; }
@@ -116,13 +122,13 @@ apt_install() {
     warn "DRY_RUN: would run apt-get install -y ${missing[*]}"
     return 0
   fi
-  apt-get update -qq
-  apt-get install -y "${missing[@]}"
+  "$NASRPI_SUDO" apt-get update -qq
+  "$NASRPI_SUDO" apt-get install "${missing[@]}"
 }
 
 # write_file MODE TARGET  ...content on stdin (idempotent: skips if identical)
 write_file() {
-  local mode=$1 target=$2 tmp target_cmp
+  local mode=$1 target=$2 usesudo=$3 tmp target_cmp
   # in DRY_RUN with a shadow root, compare/inspect the shadow copy instead
   if [ "${DRY_RUN:-0}" = "1" ] && [ -n "${NASRPI_DRY_ROOT:-}" ]; then
     target_cmp="$NASRPI_DRY_ROOT$target"
@@ -154,8 +160,13 @@ write_file() {
     fi
     rm -f "$tmp"; return 0
   fi
-  mkdir -p "$(dirname "$target")"
-  cp "$tmp" "$target" && chmod "$mode" "$target"
+  if [ -n "${usesudo}" ]; then
+    SUDO="$NASRPI_SUDO"
+  else
+    SUDO=""
+  fi
+  "$SUDO" mkdir -p "$(dirname "$target")"
+  "$SUDO" cp "$tmp" "$target" && "$SUDO" chmod "$mode" "$target"
   rm -f "$tmp"
   ok "wrote $target"
 }
@@ -164,7 +175,7 @@ write_file() {
 nas_state="${NASRPI_STATE:-$HOME/.nasrpi-state}"
 run_once() {
   local key=$1
-  grep -qxF "$key" "$nas_state" 2>/dev/null && return 1
+  grep -qxF "$key" "$nas_state" 2>/dev/null && ok "Step '${key}' previously done, skipped" && return 1
   if confirm "Step '${key}' not done yet. Do it now? (say no to revisit later)"; then
     mkdir -p "$(dirname "$nas_state")"; touch "$nas_state"
     echo "$key" >> "$nas_state"
@@ -185,8 +196,13 @@ drify() {
 
 # Edit a file with $EDITOR; fall back gracefully
 edit_file() {
-  local f=$1
-  "${EDITOR:-$(command -v emacs || command -v nano || command -v vi)}" "$f"
+  local f=$1 usesudo=$2
+  if [ -n "${usesudo}" ]; then
+    SUDO="$NASRPI_SUDO"
+  else
+    SUDO=""
+  fi
+  "$SUDO" "${EDITOR:-$(command -v emacs || command -v vi)}" "$f"
 }
 
 # Ask for a destination under /media/nas/<name> for an item (remotes, mailboxes)

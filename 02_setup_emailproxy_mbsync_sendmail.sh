@@ -13,7 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ./lib.sh
 
-PREFIX=/opt/emailproxy
+PPREFIX=/opt
+PREFIX="$PPREFIX/emailproxy"
 EP_BIN="$PREFIX/bin/emailproxy"
 EP_ACCOUNTS="$PREFIX/accounts.ini"
 EP_CFG="$PREFIX/config.cfg"
@@ -29,7 +30,7 @@ elif confirm "uv is not installed. Install it system-wide now?"; then
   if [ "${DRY_RUN:-0}" = "1" ]; then
     warn "DRY_RUN: would install uv into /usr/local/bin"
   else
-    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin "$NASRPI_SUDO" -E sh
   fi
 else
   die "uv is required for the rest of this script."
@@ -40,9 +41,9 @@ if [ -x "$EP_BIN" ] || [ "${DRY_RUN:-0}" = "1" ]; then
   ok "emailproxy installed/prepared at $EP_BIN"
 elif confirm "Install emailproxy under $PREFIX?"; then
   if [ "${DRY_RUN:-0}" = "1" ]; then
-    warn "DRY_RUN: would run: uv tool install --prefix $PREFIX emailproxy"
+    warn "DRY_RUN: would run: uv tool install emailproxy"
   else
-    uv tool install --prefix "$PREFIX" emailproxy
+    env UV_TOOL_DIR="$PPREFIX" "$NASRPI_SUDO" -E uv tool install emailproxy
   fi
 else
   die "emailproxy is required for the rest of this script."
@@ -52,7 +53,7 @@ fi
 if [ -f /etc/systemd/system/emailproxy.service ]; then
   ok "systemd service emailproxy.service already exists"
 elif confirm "Add systemd service 'emailproxy' (starts --no-gui at boot)?"; then
-  cat <<EOF | write_file 644 /etc/systemd/system/emailproxy.service
+  cat <<EOF | write_file 644 /etc/systemd/system/emailproxy.service "sudo"
 # Managed by nasrpi setup scripts
 [Unit]
 Description=Email proxy (emailproxy, no GUI)
@@ -84,7 +85,7 @@ if run_once "edit emailproxy $EP_ACCOUNTS"; then
   echo "  Add your Gmail / Outlook / whatever accounts in the editor."
   echo "  (emailproxy's local IMAP/SMTP port defaults to 1143.)"
   sleep 5
-  [ "${DRY_RUN:-0}" != "1" ] && edit_file "$EP_ACCOUNTS"
+  [ "${DRY_RUN:-0}" != "1" ] && edit_file "$EP_ACCOUNTS" "sudo"
   if confirm "Accounts added -- restart emailproxy now?"; then
     [ "${DRY_RUN:-0}" != "1" ] && systemctl restart emailproxy.service
   fi
