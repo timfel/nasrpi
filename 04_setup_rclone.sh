@@ -68,7 +68,7 @@ fi
   for r in "${REMOTES[@]}"; do
     folder=$(folder_for "$r")
     # rclone copy (not sync): copies new/changed files, never deletes at target.
-    echo "rclone copy --ignore-times --skip-links --transfers 4 --log-append /var/log/nasrpi-rclone.log '$r' '/media/nas/$folder'"
+    echo "rclone copy --ignore-checksum --skip-links --transfers 4 --log-append /var/log/nasrpi-rclone.log '$r' '/media/nas/$folder'"
   done
 } | write_file 755 "$SYNC_BIN" || true
 

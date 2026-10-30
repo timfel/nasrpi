@@ -21,7 +21,7 @@ missing, and asks before touching anything. Shared helpers live in `lib.sh`
 |---|---|
 | 01 | Puts your four disks into `/etc/fstab` (by UUID) at `/media/media`, `/media/media_parity`, `/media/nas`, `/media/nas_backup`. Guides you through picking disks by name/size, previews the fstab edit, backs up fstab first. |
 | 02 | Installs `uv` + `emailproxy` (under `/opt/emailproxy`), a systemd service `emailproxy` (`--no-gui`) at boot, lets you add Gmail/Outlook/... accounts to its config, generates `/etc/mbsyncrc` that pulls **down only** into `/media/nas/Mail/<MAILBOX>`, weekly mbsync cron (skips when `/media/nas` unmounted), and sets up **msmtp** (plus `msmtp-mta`, which provides `/usr/sbin/sendmail`) so every script, smartd and cron job sends mail through `/etc/msmtprc` → emailproxy (localhost:1143) with the upstream mailer you pick. |
-| 03 | smartmontools: monitors all disks, short tests nightly / long weekly but **never spins up spun-down disks** (`-d maint`), mails you via sendmail on degradation, and a daily checker that **unmounts** disks showing SMART failure indicators and mails a report. **Zero tolerance:** even a single reallocated / pending / uncorrectable sector, or any entry in the error log, counts as failure (edit `FAIL_ATTRS` at the top of `/usr/local/bin/nasrpi-smart-check.sh` to tune). |
+| 03 | smartmontools: monitors all disks **via `/dev/disk/by-uuid`**, short tests nightly / long weekly but **never spins up spun-down disks** (`-d maint`). smartd mails alerts itself; additionally every alert runs a `-M exec` handler (`/usr/local/bin/nasrpi-smartd-alert.sh`, device as argument, report on stdin) that logs to `/var/log/nasrpi-smart-alert.log` and **unmounts the failing disk** (`AUTO_UNMOUNT` at its top). **Zero tolerance:** `-I 5 -I 187 -I 197 -I 198` mails (and triggers the handler) the moment reallocated / uncorrected / pending sector counts change at all. |
 | 04 | Installs rclone, runs `rclone config` so you can add remotes, then a weekly cron copying every remote into `/media/nas/<REMOTENAME>` (skips when unmounted). |
 | 05 | Weekly cron: `rsync -a --delete /media/nas/ /media/nas_backup/`. Dry-runs first: if more than N% of dest files would be deleted it aborts and **sends you a report** instead. Also mails on failure. Skips when either mount is missing. |
 | 06 | snapraid: content on `/media/media`, parity on `/media/media_parity`; generates `/etc/snapraid.conf` (asks which directories to protect), runs a snapraid dry-run and **guides you if the parity location is too small**, optionally builds initial parity, then a weekly cron doing `snapraid sync` + `snapraid scrub` (skips when unmounted) that mails you if scrub or sync reports any error. |
@@ -33,8 +33,10 @@ missing, and asks before touching anything. Shared helpers live in `lib.sh`
   `/etc/nasrpi-rclone-maps` — plain `name=folder` files, edit freely.
 - Backup knobs (`NOTIFY_EMAIL`, `DELETE_PCT`): top of
   `/usr/local/bin/nasrpi-backup.sh`.
-- SMART failure attributes: `FAIL_ATTRS` at the top of
-  `/usr/local/bin/nasrpi-smart-check.sh` (zero tolerance by default).
+- SMART alert behaviour: `AUTO_UNMOUNT` at the top of
+  `/usr/local/bin/nasrpi-smartd-alert.sh` (set `no` for log/mail only);
+  watched attributes are the `-I` list in `/etc/smartd.conf` (zero tolerance
+  by default). Rerun 03 after adding or removing disks.
 - Snapraid layout: `/etc/snapraid.conf` (edit freely; rerunning 06 leaves it
   alone once it exists).
 - One-shot steps (add accounts, initial sync...) are remembered in

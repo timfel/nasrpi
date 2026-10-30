@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # 03_setup_smartmontools.sh
-# - monitor all physical disks with smartd
+# - monitor all physical disks with smartd (entries via /dev/disk/by-uuid)
 # - defer self-tests while disks are idle/spun-down (smartd -d maint)
-# - mail alerts via sendmail when anything degrades
-# - daily checker: if SMART reports reallocation/read-error failures,
-#   unmount the affected drive and mail a report
+# - smartd mails alerts itself (sendmail = msmtp shim from step 02)
+# - plus a -M exec handler: on any alert smartd runs it with the device as
+#   argument and the report on stdin; it logs and (optionally) unmounts the
+#   failing disk. No separate cron checker needed.
 set -euo pipefail
-cd "$(dirname "$0")"
-source ./lib.sh
+. "$(dirname "$0")/lib.sh"
 
 SMARTCTL_CFG="$NASRPI_ETC_DIR/smartd.conf"
-CHECKER=/usr/local/bin/nasrpi-smart-check.sh
+ALERT_BIN="/usr/local/bin/nasrpi-smartd-alert.sh"   # write_file applies the dry-run shadow
 
 say "03 - smartmontools"
 apt_install smartmontools   # sendmail (msmtp-mta) comes from step 02
@@ -33,6 +33,8 @@ for d in $DISKS; do
   fi
 done
 
+ALERT_OPTS="-M exec $ALERT_BIN \$DEVICE"
+
 build_smartd() {
   echo "# Managed by nasrpi setup scripts -- rerun 03 after adding/removing disks."
   echo "# -a : all SMART checks, -m : mail via sendmail, -s : short/long self-tests,"
@@ -40,9 +42,10 @@ build_smartd() {
   echo "# maintenance windows, so idle/spun-down disks are NOT spun up for testing."
   echo "# -I <id> : mail immediately whenever these raw attributes change --"
   echo "# zero tolerance: 5 reallocated, 187 uncorrected, 197 pending, 198 uncorrectable."
+  echo "# -M exec : run the nasrpi alert handler (device as arg, report on stdin)."
   local d
   for d in "${MON[@]}"; do
-    echo "$d -n standby,q -a -m $NOTIFY_EMAIL -o on -s (S/../.././09|L/../../6/10) -d maint -I 5 -I 187 -I 197 -I 198"
+    echo "$d -n standby,q -a -m $NOTIFY_EMAIL -o on -s (S/../.././09|L/../../6/10) -d maint -I 5 -I 187 -I 197 -I 198 $ALERT_OPTS"
   done
 }
 
@@ -60,72 +63,39 @@ if [ "${DRY_RUN:-0}" != "1" ]; then
   fi
 fi
 
-# --- failure checker: unmount drives with real failure indicators ----------------
-ask AUTO_UNMOUNT "Auto-unmount disks that show SMART failure indicators? (else alert only)" "y"
+# --- alert handler ---------------------------------------------------------------
+# smartd runs it for every alert it mails, e.g.:
+#   nasrpi-smartd-alert.sh /dev/disk/by-uuid/xxxx   (full report on stdin)
+# Whatever the handler prints is mailed by smartd too (plus its own report).
+ask AUTO_UNMOUNT "Auto-unmount disks when smartd reports a failure? (else log/mail only)" "y"
 
-tmp=$(mktemp)
-cat > "$tmp" <<EOF
+cat <<EOF | write_file 755 "$ALERT_BIN"
 #!/bin/sh
-# nasrpi: daily SMART check. Mails a report; unmounts disks on real failures.
-# Managed by nasrpi setup scripts (03). Edit AUTO_UNMOUNT here to change policy.
+# nasrpi: smartd alert handler (-M exec target).
+# Called by smartd as:  \$0 <device>   with the alert mail on stdin.
+# Managed by nasrpi setup scripts (03). Set AUTO_UNMOUNT=no below for
+# alert-only behaviour (no unmounting).
 AUTO_UNMOUNT=$([ "$AUTO_UNMOUNT" = "y" ] && echo yes || echo no)
-NOTIFY_EMAIL=$NOTIFY_EMAIL
-REPORT=\$(mktemp)
-FAILED=0
+DEV="\${1:-\$SMARTD_DEVICE}"
+LOG=/var/log/nasrpi-smart-alert.log
 
-# ZERO TOLERANCE: even a single reallocated/pending/uncorrected sector counts
-# as failure. Edit FAIL_ATTRS to tune (smartctl attribute names).
-FAIL_ATTRS="Reallocated_Sector_Ct Reallocated_Sector_Event_Count Reported_Uncorrect Current_Pending_Sector Offline_Uncorrectable"
+{
+  echo "===== \$(date '+%F %T') SMART alert for \$DEV ====="
+  cat
+  echo
+} >> "\$LOG" 2>/dev/null || true
 
-for dev in \$(lsblk -dno NAME,TYPE | awk '\$2=="disk"{print "/dev/"\$1}'); do
-  smartctl -q nodev "\$dev" >/dev/null 2>&1 && continue   # disk gone / USB pulled
-  out=\$(smartctl -H -l error -A "\$dev" 2>&1)
-  reason=""
-  echo "\$out" | grep -qiE 'SMART overall-health.*FAILED|SMART Failure Detected' \
-    && reason="\$reason overall-health-FAILED"
-  # any recorded read/handle error in the error log counts
-  echo "\$out" | grep -qE 'ATA Error Count:[[:space:]]*[1-9]' \
-    && reason="\$reason error-log-errors"
-  # zero tolerance on raw values of the attributes above
-  for attr in \$FAIL_ATTRS; do
-    raw=\$(echo "\$out" | awk -v a="\$attr" '\$2==a {print \$NF; exit}')
-    case "\$raw" in
-      ''|*[!0-9]*) : ;;   # empty, '-' or hex-encoded: not countable, skip
-      *) [ "\$raw" -gt 0 ] && reason="\$reason \$attr=\$raw" ;;
-    esac
-  done
-  if [ -n "\$reason" ]; then
-    FAILED=1
-    {
-      echo "=== SMART FAILURE on \$dev:\$reason ==="
-      echo "\$out"
-    } >> "\$REPORT"
-    if [ "\$AUTO_UNMOUNT" = yes ]; then
-      for mp in \$(lsblk -rno MOUNTPOINT "\$dev" | grep .); do
-        if umount -R "\$mp" 2>> "\$REPORT"; then
-          echo "unmounted \$mp (failing disk \$dev)" >> "\$REPORT"
-        else
-          echo "could NOT unmount \$mp (failing disk \$dev)" >> "\$REPORT"
-        fi
-      done
+if [ "\$AUTO_UNMOUNT" = yes ]; then
+  for mp in \$(lsblk -rno MOUNTPOINT "\$DEV" 2>/dev/null | grep .); do
+    if umount -R "\$mp" 2>/dev/null; then
+      echo "nasrpi: UNMOUNTED \$mp (failing disk \$DEV)"
+    else
+      echo "nasrpi: could NOT unmount \$mp (failing disk \$DEV)"
     fi
-  fi
-done
-
-if [ "\$FAILED" = 1 ]; then
-  {
-    echo "To: \$NOTIFY_EMAIL"
-    echo "Subject: nasrpi: SMART failure detected on \$(hostname)"
-    echo
-    cat "\$REPORT"
-  } | sendmail -t 2>/dev/null || cat "\$REPORT"
+  done
 fi
-rm -f "\$REPORT"
+
+echo "nasrpi: SMART alert for \$DEV at \$(date '+%F %T'); full report in \$LOG."
 EOF
-write_file 755 "$CHECKER" < "$tmp"
-rm -f "$tmp"
 
-ask_dow_hour SMART
-install_cron nasrpi-smart "$SMART_DOW $SMART_HOUR $SMART_MIN" "$CHECKER"
-
-say "03 done. Test with: sudo smartctl -a /dev/sda"
+say "03 done. Test with: echo test | sudo $ALERT_BIN /dev/sda"

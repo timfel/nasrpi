@@ -98,20 +98,19 @@ check "cron reported already correct" "already correct" "$T/02b.out"
 check "mbsyncrc reported up to date"  "already up to date" "$T/02b.out"
 
 echo "=== 03 smartmontools"
-runtest 03 'alerts@example.com\ny\n6\n2\n30\ny\n' ./03_setup_smartmontools.sh
+runtest 03 'alerts@example.com\ny\n' ./03_setup_smartmontools.sh
 check "smartd monitors sda"       "/dev/disk/by-uuid/11111111-0000-0000-0000-0000000000sda -n standby,q -a -m alerts@example.com" "$R/etc/smartd.conf"
 check "smartd covers all disks"    "/dev/disk/by-uuid/11111111-0000-0000-0000-0000000000sdd" "$R/etc/smartd.conf"
 check "no spin-up for self-tests"  "-d maint"                          "$R/etc/smartd.conf"
-check "smartd watches attrs"    "-I 5 -I 187 -I 197 -I 198"        "$R/etc/smartd.conf"
-check "smart cron installed"      "nasrpi-smart-check.sh"      "$R/etc/cron.d/nasrpi-smart"
-check "zero-tolerance attrs"      "FAIL_ATTRS="                        "$R/usr/local/bin/nasrpi-smart-check.sh"
-check "zero-tolerance: reallocated" "Reallocated_Sector_Ct"              "$R/usr/local/bin/nasrpi-smart-check.sh"
-check "zero-tolerance: pending"     "Current_Pending_Sector"             "$R/usr/local/bin/nasrpi-smart-check.sh"
-check "checker unmounts failures" "umount -R"                          "$R/usr/local/bin/nasrpi-smart-check.sh"
-check "checker mails via sendmail" "sendmail -t"                         "$R/usr/local/bin/nasrpi-smart-check.sh"
-sh -n "$R/usr/local/bin/nasrpi-smart-check.sh" \
-  && { echo "  PASS: smart checker syntax"; pass=$((pass+1)); } \
-  || { echo "  FAIL: smart checker syntax"; fail=$((fail+1)); }
+check "smartd watches attrs"       "-I 5 -I 187 -I 197 -I 198"         "$R/etc/smartd.conf"
+check "smartd EXEC handler"        "-M exec /usr/local/bin/nasrpi-smartd-alert.sh" "$R/etc/smartd.conf"
+check "smartd passes device to handler" '$DEVICE'                       "$R/etc/smartd.conf"
+check "handler auto-unmount on"   "AUTO_UNMOUNT=yes"                   "$R/usr/local/bin/nasrpi-smartd-alert.sh"
+check "handler unmounts failures" "umount -R"                          "$R/usr/local/bin/nasrpi-smartd-alert.sh"
+check "handler logs alerts"       "nasrpi-smart-alert.log"             "$R/usr/local/bin/nasrpi-smartd-alert.sh"
+sh -n "$R/usr/local/bin/nasrpi-smartd-alert.sh" \
+  && { echo "  PASS: alert handler syntax"; pass=$((pass+1)); } \
+  || { echo "  FAIL: alert handler syntax"; fail=$((fail+1)); }
 
 echo "=== 04 rclone"
 runtest 04 'y\n\n2\n4\n0\ny\n' ./04_setup_rclone.sh
@@ -185,6 +184,30 @@ if diff -r "$T/fsrc" "$SB/dest" >/dev/null 2>&1; then
 else
   echo "  FAIL: dest does not mirror src"; fail=$((fail+1))
 fi
+
+echo "=== 03b: actually RUN the smartd alert handler"
+cat > "$SB/bin/lsblk" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *MOUNTPOINT*) echo "/media/test" ;;   # pretend the failing disk is mounted here
+  *) exit 0 ;;
+esac
+EOF
+cat > "$SB/bin/umount" <<EOF
+#!/bin/sh
+echo "umount \$*" >> "$SB/umount.log"
+EOF
+chmod +x "$SB/bin/lsblk" "$SB/bin/umount"
+sed "s|^LOG=.*|LOG=$SB/alert.log|" "$R/usr/local/bin/nasrpi-smartd-alert.sh" > "$SB/run-alert.sh"
+if echo "simulated smartd alert mail body" \
+   | PATH="$SB/bin:$PATH" sh "$SB/run-alert.sh" /dev/disk/by-uuid/fake > "$T/03b.out" 2>&1; then
+  echo "  PASS: alert handler exits 0"; pass=$((pass+1))
+else
+  echo "  FAIL: alert handler failed"; cat "$T/03b.out"; fail=$((fail+1))
+fi
+check "handler output mailed back (stdout)" "SMART alert for" "$T/03b.out"
+check "handler unmounted the disk"  "UNMOUNTED /media/test"     "$T/03b.out"
+check "handler called umount -R"    "umount -R /media/test"     "$SB/umount.log"
 
 echo "=== 06 snapraid"
 export NASRPI_MEDIA_DIR="$T/media" NASRPI_PARITY_DIR="$T/parity"
