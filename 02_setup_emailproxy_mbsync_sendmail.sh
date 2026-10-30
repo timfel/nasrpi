@@ -77,7 +77,7 @@ if [ "${DRY_RUN:-0}" != "1" ] && [ ! -f "$EP_ACCOUNTS" ] && [ -x "$EP_BIN" ]; th
   echo "  Starting emailproxy briefly so it can create its default config..."
   timeout 20 "$EP_BIN" --no-gui >/dev/null 2>&1 || true
 fi
-if run_once "emailproxy-accounts"; then
+if run_once "edit emailproxy $EP_ACCOUNTS"; then
   echo "  Add your Gmail / Outlook / whatever accounts in the editor."
   echo "  (emailproxy's local IMAP/SMTP port defaults to 1143.)"
   sleep 5

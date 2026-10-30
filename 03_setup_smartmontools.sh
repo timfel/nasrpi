@@ -18,8 +18,20 @@ apt_install smartmontools   # sendmail (msmtp-mta) comes from step 02
 ask NOTIFY_EMAIL "Address to receive SMART alerts" "root"
 
 # --- which disks to monitor -----------------------------------------------------
+# smartd entries use stable /dev/disk/by-uuid/<uuid> paths where a filesystem
+# UUID exists (survives reconnects/port changes); falls back to /dev/sdX.
 DISKS=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}')
-echo "$DISKS" | sed 's/^/  /'
+MON=()
+for d in $DISKS; do
+  u=$(lsblk -rno UUID "$d" 2>/dev/null | grep -m1 . || true)
+  if [ -n "$u" ]; then
+    MON+=("/dev/disk/by-uuid/$u")
+    echo "  $d -> /dev/disk/by-uuid/$u"
+  else
+    warn "no filesystem UUID on $d -- monitoring by name (may change on reconnect)"
+    MON+=("$d")
+  fi
+done
 
 build_smartd() {
   echo "# Managed by nasrpi setup scripts -- rerun 03 after adding/removing disks."
@@ -29,7 +41,7 @@ build_smartd() {
   echo "# -I <id> : mail immediately whenever these raw attributes change --"
   echo "# zero tolerance: 5 reallocated, 187 uncorrected, 197 pending, 198 uncorrectable."
   local d
-  for d in $DISKS; do
+  for d in "${MON[@]}"; do
     echo "$d -n standby,q -a -m $NOTIFY_EMAIL -o on -s (S/../.././09|L/../../6/10) -d maint -I 5 -I 187 -I 197 -I 198"
   done
 }
@@ -38,13 +50,13 @@ build_smartd() {
 existing=""
 if [ -f "$SMARTCTL_CFG" ]; then
   existing=$(grep -v '^# Managed by nasrpi' "$SMARTCTL_CFG" \
-             | grep -v '^\S* -a -m .* -d maint' || true)
+             | grep -v ' -d maint' || true)
 fi
 { [ -n "$existing" ] && echo "$existing"; build_smartd; } | write_file 644 "$SMARTCTL_CFG" || true
 
 if [ "${DRY_RUN:-0}" != "1" ]; then
-  if confirm "Restart smartd now?"; then
-    systemctl restart smartd && ok "smartd restarted"
+  if confirm "Restart the smartmontools service now?"; then
+    systemctl restart smartmontools && ok "smartmontools restarted"
   fi
 fi
 

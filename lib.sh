@@ -170,6 +170,7 @@ run_once() {
     echo "$key" >> "$nas_state"
     return 0
   fi
+  echo "Step '${key}' previously done, skipped"
   return 1
 }
 

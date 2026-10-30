@@ -23,6 +23,8 @@ case "$*" in
   *SIZE*)                   echo "4T" ;;
   *MODEL*)                  echo "FakeModel" ;;
   *MOUNTPOINT*)             echo "" ;;
+  *UUID*)                   dev=$(echo "$*" | awk '{print $NF}')
+                            echo "11111111-0000-0000-0000-0000000000${dev##*/}" ;;
   *)                        exit 0 ;;   # lsblk -n <dev> -> no children
 esac
 EOF
@@ -97,8 +99,8 @@ check "mbsyncrc reported up to date"  "already up to date" "$T/02b.out"
 
 echo "=== 03 smartmontools"
 runtest 03 'alerts@example.com\ny\n6\n2\n30\ny\n' ./03_setup_smartmontools.sh
-check "smartd monitors sda"       "/dev/sda -n standby,q -a -m alerts@example.com" "$R/etc/smartd.conf"
-check "smartd covers all disks"    "/dev/sdd -n standby,q -a"          "$R/etc/smartd.conf"
+check "smartd monitors sda"       "/dev/disk/by-uuid/11111111-0000-0000-0000-0000000000sda -n standby,q -a -m alerts@example.com" "$R/etc/smartd.conf"
+check "smartd covers all disks"    "/dev/disk/by-uuid/11111111-0000-0000-0000-0000000000sdd" "$R/etc/smartd.conf"
 check "no spin-up for self-tests"  "-d maint"                          "$R/etc/smartd.conf"
 check "smartd watches attrs"    "-I 5 -I 187 -I 197 -I 198"        "$R/etc/smartd.conf"
 check "smart cron installed"      "nasrpi-smart-check.sh"      "$R/etc/cron.d/nasrpi-smart"

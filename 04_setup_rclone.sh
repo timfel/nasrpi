@@ -24,7 +24,7 @@ else
 fi
 
 # --- configure remotes -----------------------------------------------------------
-if run_once "rclone-remotes"; then
+if run_once "rclone config"; then
   echo "  rclone's own config wizard will start; add whatever remotes you need."
   [ "${DRY_RUN:-0}" != "1" ] && rclone config
 fi
