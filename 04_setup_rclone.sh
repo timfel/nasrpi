@@ -61,6 +61,9 @@ if [ ! -f "$MAPS_FILE" ] && { [ "${DRY_RUN:-0}" != "1" ] || [ -n "${NASRPI_DRY_R
   $NASRPI_SUDO mv "$tmp" "$MAPS_FILE"
   $NASRPI_SUDO chmod 644 "$MAPS_FILE"
   ok "saved folder mapping to $MAPS_FILE (edit that file any time)"
+else
+  ok "folder mapping at $MAPS_FILE exists (edit that file any time)"
+  cat "$MAPS_FILE"
 fi
 
 # --- sync script + weekly cron -----------------------------------------------------
