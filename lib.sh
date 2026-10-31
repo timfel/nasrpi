@@ -99,8 +99,9 @@ $min $hour * * $dow root $cmd
     if [ "${DRY_RUN:-0}" = "1" ] && [ -z "${NASRPI_DRY_ROOT:-}" ]; then
       warn "DRY_RUN: would install $dest"
     else
-      mkdir -p "$(dirname "$dest")"
-      cp "$tmp" "$dest" && chmod 644 "$dest"
+      # unquoted: NASRPI_SUDO is empty when already root ("$var" cmd would run "")
+      $NASRPI_SUDO mkdir -p "$(dirname "$dest")"
+      $NASRPI_SUDO cp "$tmp" "$dest" && chmod 644 "$dest"
       ok "installed $dest"
     fi
     rm -f "$tmp"

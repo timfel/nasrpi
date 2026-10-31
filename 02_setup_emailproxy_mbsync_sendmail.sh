@@ -7,9 +7,11 @@
 #     [IMAP-1993] / [POP-1995] / [SMTP-1587]  -> local listener + upstream server
 #     [you@example.com]                       -> one section per mail account
 #   Everything below is driven by that file: accounts, local ports, TLS mode.
-# - when the account set changes: OAuth via emailproxy --external-auth
-#   (service stopped, proxy runs in the foreground and prompts you itself;
-#    one IMAP login per account is triggered, accepted login == token acquired)
+# - OAuth sign-in: you run emailproxy --external-auth yourself in a second
+#   shell; this script stops the service, triggers one IMAP login per account
+#   (each login makes the proxy show its OAuth prompts in your other shell),
+#   and restarts the service when you are done. No state tracking -- rerun 02
+#   any time an account needs (re)authentication.
 # - mbsync pulling via emailproxy into /media/nas/Mail/<MAILBOX> (down only)
 # - weekly cron for mbsync (skips when /media/nas is not mounted)
 # - sendmail via msmtp + msmtp-mta, relaying through emailproxy's SMTP port
@@ -35,7 +37,6 @@ IMAP_PORT=1993
 SMTP_PORT=1587
 IMAP_TLS=off
 SMTP_TLS=off
-EP_AUTH_TRIES=3          # login attempts per account during the OAuth flow
 
 say "02 - emailproxy + mbsync + sendmail"
 
@@ -205,147 +206,45 @@ if [ -z "$EP_PASSWORD" ] || confirm "Proxy login password on record. Re-enter it
   echo
 fi
 
-# --- OAuth external authentication (when the account set changes) --------------
-# emailproxy only needs a token when a client logs in, and in
-# `--no-gui --external-auth` mode it prints the OAuth URL and prompts for the
-# post-authentication URL itself (which needs a real terminal). So: stop the
-# service, run the proxy in the FOREGROUND attached to this terminal, trigger one
-# IMAP login per account in the background, and treat "login accepted" (helper
-# exit 0) as "this account has a working token".
-EP_ACCTS_STATE="${NASRPI_STATE:-$HOME/.nasrpi-state}.emailproxy-accounts"
-EP_LOG=""
-EP_RESULT=""
-ep_pid=""
-ep_worker=""
-
-auth_trigger() {  # $1 = account; exit 0 once emailproxy accepts the login
-  "$EP_PY" "$EP_TOOL" imap-login --host "$IMAP_HOST" --port "$IMAP_PORT" \
-    --user "$1" --password "$EP_PASSWORD"
-}
-
-auth_worker() {  # $1 = pidfile; runs in the BACKGROUND while the proxy is in fg
-  local pidfile=$1 acct attempt line finished=0
-  shift
-  while [ ! -s "$pidfile" ]; do sleep 0.5; done
-  read -r ep_pid < "$pidfile"
+# --- OAuth sign-in: you run emailproxy in a SECOND shell -----------------------
+# emailproxy only shows its OAuth prompts in the terminal it owns, so this
+# script never runs the proxy itself. It stops the service, tells you how to
+# start the proxy in a second shell, then triggers one IMAP login per account:
+# each login makes the proxy print its OAuth URL and prompt for the paste-back
+# in YOUR other shell, where you do the browser flow. "Login accepted" == that
+# account has a working token. No state tracking -- rerun 02 any time.
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  warn "DRY_RUN: would stop emailproxy.service, tell you to run emailproxy"
+  warn "DRY_RUN: --no-gui --external-auth in a second shell, wait for you, trigger"
+  warn "DRY_RUN: one IMAP login per account, and restart the service when you are done."
+else
+  warn "Stopping emailproxy.service -- the OAuth prompts need a terminal of their own."
+  systemctl stop emailproxy.service
+  echo
+  echo "  Open a SECOND shell and run the proxy there:"
+  echo
+  echo "      sudo $EP_BIN --no-gui --external-auth --config-file $EP_ACCOUNTS"
+  echo
+  echo "  Leave it running: all sign-in prompts appear in THAT shell."
+  read -r -p "  Press Enter once emailproxy is running in the other shell... " _ || true
   sleep 3                                  # let the proxy bind its local ports
-  for acct in "$@"; do
-    [ "$finished" = 1 ] && break
-    attempt=1
-    while (( attempt <= EP_AUTH_TRIES )) && kill -0 "$ep_pid" 2>/dev/null; do
-      say "Account $acct (attempt $attempt/$EP_AUTH_TRIES): logging in through the proxy"
-      if line=$(auth_trigger "$acct" 2>&1); then
-        ok "$acct: login accepted -- OAuth token in place"
-        echo "ok $acct" >> "$EP_RESULT"
-        break
-      else
-        printf '%s\n' "$line" | while IFS= read -r l; do warn "  $l"; done
-        warn "$acct: login not accepted (attempt $attempt/$EP_AUTH_TRIES) -- retrying"
-      fi
-      attempt=$((attempt + 1))
-      sleep 3
-    done
-    if ! kill -0 "$ep_pid" 2>/dev/null; then
-      warn "proxy is no longer running (see its output above) -- aborting OAuth flow"
-      echo "failed $acct" >> "$EP_RESULT"
-      for acct in "$@"; do grep -qF "$acct" "$EP_RESULT" || echo "skipped $acct" >> "$EP_RESULT"; done
-      finished=1
-    elif [ "$attempt" -gt "$EP_AUTH_TRIES" ]; then
-      echo "failed $acct" >> "$EP_RESULT"
-      # everything else would just hang on a proxy that won't accept logins
-      for acct in "$@"; do grep -qF "$acct" "$EP_RESULT" || echo "skipped $acct" >> "$EP_RESULT"; done
-      finished=1
+
+  for a in "${ACCOUNTS[@]}"; do
+    say "Triggering login for $a -- do the sign-in in the OTHER shell if it asks"
+    if "$EP_PY" "$EP_TOOL" imap-login --host "$IMAP_HOST" --port "$IMAP_PORT" \
+         --user "$a" --password "$EP_PASSWORD"; then
+      ok "$a: login accepted -- OAuth token in place"
+    else
+      warn "$a: login not accepted -- rerun 02 (or this flow) to retry"
     fi
   done
-  # all accounts handled: stop the foreground proxy so the script can continue
-  echo "done" >> "$EP_RESULT"
-  kill -INT "$ep_pid" 2>/dev/null || true
-}
 
-ep_stop_service() {
-  [ "${DRY_RUN:-0}" = "1" ] && return 0
-  warn "Stopping emailproxy.service (the foreground proxy needs this terminal)"
-  systemctl stop emailproxy.service
-}
-
-ep_report_results() {
-  [ -f "$EP_RESULT" ] || return 0
-  while read -r st acct; do
-    case "$st" in
-      failed)  warn "$acct: OAuth flow did not complete -- rerun 02 to retry" ;;
-      skipped) warn "$acct: skipped (an earlier account failed) -- rerun 02" ;;
-    esac
-  done < "$EP_RESULT"
-}
-
-ep_restore_service() {
-  [ "${DRY_RUN:-0}" = "1" ] && return 0
-  if [ -n "$ep_worker" ]; then
-    kill "$ep_worker" 2>/dev/null || true
-    wait "$ep_worker" 2>/dev/null || true
-    ep_worker=""
-  fi
-  if [ -n "$ep_pid" ]; then
-    kill "$ep_pid" 2>/dev/null || true
-    wait "$ep_pid" 2>/dev/null || true
-    ep_pid=""
-  fi
+  echo
+  read -r -p "  Finished? Ctrl-C the proxy in the other shell, then press Enter here... " _ || true
   if systemctl start emailproxy.service 2>/dev/null; then
     ok "emailproxy.service restored"
   else
     warn "could not start emailproxy.service -- start it manually"
-  fi
-}
-
-external_auth_flow() {  # $@ = accounts to (re)authenticate
-  local accts=("$@")
-  say "OAuth external-authentication for: ${accts[*]}"
-  if [ "${DRY_RUN:-0}" = "1" ]; then
-    warn "DRY_RUN: would stop emailproxy.service, run emailproxy --external-auth in"
-    warn "DRY_RUN: this terminal (it shows the OAuth URL and takes your pasted URL),"
-    warn "DRY_RUN: triggering an IMAP login per account until it is accepted."
-    return 0
-  fi
-
-  EP_LOG=$(mktemp /tmp/nasrpi-emailproxy-auth.XXXXXX)
-  EP_RESULT=$(mktemp /tmp/nasrpi-emailproxy-result.XXXXXX)
-  ep_stop_service
-  trap 'ep_restore_service' EXIT INT
-
-  warn "emailproxy runs in the foreground now and will prompt you directly."
-  warn "Sign in at the URL it shows, then paste the browser's final URL at its prompt. (Ctrl-C aborts)"
-
-  # emailproxy must own this terminal: as a background job bash would give it
-  # /dev/null on stdin ("Input is not a terminal") and the auth prompt dies.
-  # So the proxy stays in the FOREGROUND and the IMAP login triggers run in a
-  # background worker, which stops the proxy (SIGINT) once every account is done.
-  ep_pidfile=$(mktemp /tmp/nasrpi-emailproxy-pid.XXXXXX)
-  auth_worker "$ep_pidfile" "${accts[@]}" &
-  ep_worker=$!
-
-  # left side of the pipe: subshell writes its pid, then exec's the proxy.
-  # stdin is untouched (still this tty), stdout goes through tee into EP_LOG.
-  # ($BASHPID, not $$: inside a subshell $$ is still the parent script's pid)
-  ( echo "${BASHPID:-$$}" > "$ep_pidfile"; exec "$EP_BIN" --no-gui --external-auth --config-file "$EP_ACCOUNTS" ) 2>&1 | tee "$EP_LOG"
-
-  ep_report_results
-  wait "$ep_worker" 2>/dev/null || true
-  ep_worker=""
-  local flow_rc=0        # 0 = every account authenticated -> record the account set
-  grep -qE '^(failed|skipped) ' "$EP_RESULT" 2>/dev/null && flow_rc=1
-  rm -f "$ep_pidfile" "$EP_RESULT"
-  return "$flow_rc"
-}
-
-EP_ACCTS_CUR=$(printf '%s\n' "${ACCOUNTS[@]}" | sort)
-EP_ACCTS_PREV=""
-[ -f "$EP_ACCTS_STATE" ] && EP_ACCTS_PREV=$(cat "$EP_ACCTS_STATE")
-if [ "$EP_ACCTS_CUR" != "$EP_ACCTS_PREV" ]; then
-  if external_auth_flow "${ACCOUNTS[@]}"; then
-    printf '%s\n' "$EP_ACCTS_CUR" > "$EP_ACCTS_STATE"
-    ok "account set recorded ($EP_ACCTS_STATE) -- external-auth flow reruns only on change"
-  else
-    warn "account set NOT recorded: some accounts still need OAuth -- rerun 02 to retry."
   fi
 fi
 
@@ -364,15 +263,16 @@ default_folder() {  # tim.felgentreff@oracle.com -> oracle ; fallback: whole add
 }
 
 if run_once "write mbsync-mailbox-names to $MAPS_FILE"; then
-  : > "$MAPS_FILE.tmp"
+  maps_tmp=$(mktemp)                    # writable anywhere; moved into place with sudo below
   for a in "${ACCOUNTS[@]}"; do
     d=$(default_folder "$a")
     n=$d; i=2
-    while grep -q "=$n\$" "$MAPS_FILE.tmp" 2>/dev/null; do n="${d}-$i"; i=$((i+1)); done
+    while grep -q "=$n\$" "$maps_tmp" 2>/dev/null; do n="${d}-$i"; i=$((i+1)); done
     read -r -p "  Mail folder name for '$a' [${n}]: " custom || custom=""
-    echo "${a}=${custom:-$n}" >> "$MAPS_FILE.tmp"
+    echo "${a}=${custom:-$n}" >> "$maps_tmp"
   done
-  mkdir -p "$(dirname "$MAPS_FILE")" && mv "$MAPS_FILE.tmp" "$MAPS_FILE"
+  # unquoted $NASRPI_SUDO: empty when already root
+  $NASRPI_SUDO mkdir -p "$(dirname "$MAPS_FILE")" && $NASRPI_SUDO mv "$maps_tmp" "$MAPS_FILE"
   ok "saved folder mapping to $MAPS_FILE (edit that file any time)"
 fi
 
@@ -428,7 +328,7 @@ EOF
 # holds the local proxy password -> keep it root-only
 if build_mbsyncrc | write_file 600 "$MBSYNCRC" "sudo"; then
   if [ "${DRY_RUN:-0}" != "1" ] && run_once "mbsync -c $MBSYNCRC"; then
-    echo "  First sync (tokens acquired via the external-auth flow above)."
+    echo "  First sync (tokens acquired via the sign-in flow above)."
     mbsync -c "$MBSYNCRC" -a || warn "initial sync failed (is emailproxy running?)"
   fi
 fi
@@ -481,7 +381,7 @@ build_msmtprc() {
   echo "account default : emailproxy"
 }
 if [ ! -f "$MSMTPRC_VIEW" ] || confirm "Existing msmtp config found. Replace it?"; then
-  build_msmtprc | write_file 600 "$MSMTPRC" "sudo" || warn "kept existing msmtp config"
+  build_msmtprc | write_file 600 "$MSMTPRC" "sudo"# || warn "kept existing msmtp config"
 fi
 if [ "${DRY_RUN:-0}" != "1" ]; then
   # sanity check: does it actually talk to emailproxy?

@@ -126,8 +126,8 @@ CFG
 runtest02_input='y\ny\nlocalproxy_pw\ny\n\n\n0\n3\n15\ny\n'
 runtest 02 "$runtest02_input" ./02_setup_emailproxy_mbsync_sendmail.sh
 check "systemd unit: our config file" "ExecStart=/opt/emailproxy/bin/emailproxy --no-gui --config-file /opt/emailproxy/accounts.ini" "$R/etc/systemd/system/emailproxy.service"
-check "accounts found from ini"    "tim.felgentreff@oracle.com" "$NASRPI_STATE.emailproxy-accounts"
-check "second account found"       "timfelgentreff@gmail.com"   "$NASRPI_STATE.emailproxy-accounts"
+check "accounts found from ini"    "tim.felgentreff@oracle.com" "$T/02.out"
+check "second account found"       "timfelgentreff@gmail.com"   "$T/02.out"
 check "sample entries reported"    "sample placeholder"          "$T/02.out"
 check "mbsyncrc: oracle account"   "IMAPAccount tim_felgentreff_oracle_com" "$R/etc/mbsyncrc"
 check "mbsyncrc: gmail account"    "IMAPAccount timfelgentreff_gmail_com"   "$R/etc/mbsyncrc"
