@@ -37,7 +37,7 @@ else
 
   # everything under $MEDIA_DIR is protected (single recursive "add")
   [ -d "$MEDIA_DIR" ] || warn "$MEDIA_DIR not mounted? config still generated"
-  build_conf | write_file 644 "$CONF" || die "not writing snapraid config"
+  build_conf | write_file 644 "$CONF" "sudo" || die "not writing snapraid config"
 
   # --- guide me if the parity location is too small ------------------------------
   while :; do
@@ -45,7 +45,7 @@ else
       warn "DRY_RUN: skipping snapraid size check"
       break
     fi
-    if out=$(snapraid -c "$CONF" -n sync 2>&1); then
+    if out=$($NASRPI_SUDO snapraid -c "$CONF" -n sync 2>&1); then
       ok "snapraid accepts this layout"
       break
     fi
@@ -54,7 +54,7 @@ else
     echo "  Common cause: parity location too small for the data."
     if confirm "Choose a different parity location?"; then
       ask PARITY_FILE "New parity file path" "$PARITY_DIR/snapraid.parity"
-      build_conf | write_file 644 "$CONF" || break
+      build_conf | write_file 644 "$CONF" "sudo" || break
     else
       warn "Keeping this config -- fix parity before the first sync!"
       break
@@ -64,15 +64,15 @@ else
   # --- first parity build -----------------------------------------------------------
   if confirm "Build initial parity now? (can take many hours; no = do it manually later)"; then
     if [ "${DRY_RUN:-0}" != "1" ]; then
-      mkdir -p /root/.snapraid "$PARITY_DIR/.snapraid"
-      snapraid -c "$CONF" sync \
+      $NASRPI_SUDO mkdir -p /root/.snapraid "$PARITY_DIR/.snapraid"
+      $NASRPI_SUDO snapraid -c "$CONF" sync \
         || warn "initial sync failed -- fix, then run: sudo snapraid -c $CONF sync"
     fi
   fi
 fi
 
 # --- weekly sync + scrub cron ---------------------------------------------------------
-cat <<EOF | write_file 755 "$CRON_BIN"
+cat <<EOF | write_file 755 "$CRON_BIN" "sudo"
 #!/bin/bash
 # nasrpi: weekly snapraid sync + scrub.
 # Managed by nasrpi setup scripts (06); rerun 06 to regenerate.

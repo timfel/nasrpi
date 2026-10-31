@@ -105,8 +105,8 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
   if [ "${DRY_RUN:-0}" != "1" ]; then
-    systemctl daemon-reload
-    systemctl enable --now emailproxy.service
+    $NASRPI_SUDO systemctl daemon-reload
+    $NASRPI_SUDO systemctl enable --now emailproxy.service
     ok "emailproxy.service enabled"
   fi
 fi
@@ -219,7 +219,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   warn "DRY_RUN: one IMAP login per account, and restart the service when you are done."
 elif confirm "Run the OAuth sign-in flow now? (needed for new or re-auth accounts; no if tokens already work)"; then
   warn "Stopping emailproxy.service -- the OAuth prompts need a terminal of their own."
-  systemctl stop emailproxy.service
+  $NASRPI_SUDO systemctl stop emailproxy.service
   echo
   echo "  Open a SECOND shell and run the proxy there:"
   echo
@@ -241,7 +241,7 @@ elif confirm "Run the OAuth sign-in flow now? (needed for new or re-auth account
 
   echo
   read -r -p "  Finished? Ctrl-C the proxy in the other shell, then press Enter here... " _ || true
-  if systemctl start emailproxy.service 2>/dev/null; then
+  if $NASRPI_SUDO systemctl start emailproxy.service 2>/dev/null; then
     ok "emailproxy.service restored"
   else
     warn "could not start emailproxy.service -- start it manually"
@@ -273,7 +273,9 @@ if [ ! -f "$MAPS_FILE" ]; then
     echo "${a}=${custom:-$n}" >> "$maps_tmp"
   done
   # unquoted $NASRPI_SUDO: empty when already root
-  $NASRPI_SUDO mkdir -p "$(dirname "$MAPS_FILE")" && $NASRPI_SUDO mv "$maps_tmp" "$MAPS_FILE"
+  $NASRPI_SUDO mkdir -p "$(dirname "$MAPS_FILE")"
+  $NASRPI_SUDO mv "$maps_tmp" "$MAPS_FILE"
+  $NASRPI_SUDO chmod 644 "$MAPS_FILE"   # readable on later unprivileged reruns
   ok "saved folder mapping to $MAPS_FILE (edit that file any time)"
 fi
 
@@ -329,7 +331,7 @@ EOF
 # holds the local proxy password -> keep it root-only
 if build_mbsyncrc | write_file 600 "$MBSYNCRC" "sudo"; then
   if [ "${DRY_RUN:-0}" != "1" ] && confirm "Run mbsync now to pull mail?"; then
-    mbsync -c "$MBSYNCRC" -a || warn "sync failed (is emailproxy running?)"
+    $NASRPI_SUDO mbsync -c "$MBSYNCRC" -a || warn "sync failed (is emailproxy running?)"
   fi
 fi
 
@@ -387,7 +389,7 @@ if [ "${DRY_RUN:-0}" != "1" ]; then
   # sanity check: does it actually talk to emailproxy?
   if confirm "Send a test mail to $smtp_account to verify?"; then
     if { echo "To: $smtp_account"; echo "Subject: nasrpi test mail"; echo; echo "test"; } \
-         | sendmail -t 2>/dev/null; then
+         | $NASRPI_SUDO sendmail -t 2>/dev/null; then
       ok "sendmail (msmtp) relays through emailproxy as $smtp_account"
     else
       warn "test send failed -- check $MSMTPRC and that emailproxy is running"

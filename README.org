@@ -1,14 +1,15 @@
 * nasrpi setup scripts
 
-Idempotent, interactive setup scripts for the NAS Raspberry Pi. Run them in
-order, as root, on the Pi:
+Run them in order, as your normal user, on the Pi; they escalate with ~sudo~
+exactly where root is needed:
 
 #+begin_src sh
-sudo ./01_establish_mount_points.sh
-sudo ./02_setup_emailproxy_mbsync_sendmail.sh
-sudo ./03_setup_smartmontools.sh
-sudo ./04_setup_rclone.sh
-sudo ./05_setup_backup.sh
+./01_establish_mount_points.sh
+./02_setup_emailproxy_mbsync_sendmail.sh
+./03_setup_smartmontools.sh
+./04_setup_rclone.sh
+./05_setup_backup.sh
+./06_setup_snapraid.sh
 #+end_src
 
 Run any of them again any time: everything checks first, changes only what's

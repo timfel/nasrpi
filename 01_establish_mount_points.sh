@@ -126,13 +126,13 @@ else
     "$NASRPI_SUDO" cp "$NASRPI_FSTAB" "$NASRPI_FSTAB.nasrpi.bak.$(date +%Y%m%d%H%M%S)"
     ok "backup saved as $NASRPI_FSTAB.nasrpi.bak.*"
   fi
-  echo "$new_lines" >> "$NASRPI_FSTAB"
+  echo "$new_lines" | $NASRPI_SUDO tee -a "$NASRPI_FSTAB" >/dev/null
   ok "fstab updated (backup saved next to it)"
   if [ "${DRY_RUN:-0}" != "1" ] && confirm "Create mount directories and mount now?"; then
     for mp in "${!wanted[@]}"; do
       [ "${wanted[$mp]}" = "KEEP" ] && continue
-      mkdir -p "$mp"
-      mountpoint -q "$mp" || mount "$mp" || warn "could not mount $mp now"
+      $NASRPI_SUDO mkdir -p "$mp"
+      mountpoint -q "$mp" || $NASRPI_SUDO mount "$mp" || warn "could not mount $mp now"
     done
   fi
 fi

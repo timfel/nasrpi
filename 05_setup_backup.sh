@@ -81,7 +81,7 @@ fi
 echo "\$(date): backup complete" >> "\$LOG"
 EOF
 
-write_file 755 "$BACKUP_BIN" < "$tmp"
+write_file 755 "$BACKUP_BIN" "sudo" < "$tmp"
 rm -f "$tmp"
 
 install_cron nasrpi-backup "$BACKUP_DOW $BACKUP_HOUR $BACKUP_MIN" "$BACKUP_BIN"

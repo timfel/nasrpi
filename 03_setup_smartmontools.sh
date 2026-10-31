@@ -55,11 +55,11 @@ if [ -f "$SMARTCTL_CFG" ]; then
   existing=$(grep -v '^# Managed by nasrpi' "$SMARTCTL_CFG" \
              | grep -v ' -d maint' || true)
 fi
-{ [ -n "$existing" ] && echo "$existing"; build_smartd; } | write_file 644 "$SMARTCTL_CFG" || true
+{ [ -n "$existing" ] && echo "$existing"; build_smartd; } | write_file 644 "$SMARTCTL_CFG" "sudo" || true
 
 if [ "${DRY_RUN:-0}" != "1" ]; then
   if confirm "Restart the smartmontools service now?"; then
-    systemctl restart smartmontools && ok "smartmontools restarted"
+    $NASRPI_SUDO systemctl restart smartmontools && ok "smartmontools restarted"
   fi
 fi
 
@@ -70,7 +70,7 @@ fi
 # it itself -- the handler logs, unmounts, and mails the report via sendmail.
 ask AUTO_UNMOUNT "Auto-unmount disks when smartd reports a failure? (else log/mail only)" "y"
 
-cat <<EOF | write_file 755 "$ALERT_BIN"
+cat <<EOF | write_file 755 "$ALERT_BIN" "sudo"
 #!/bin/sh
 # nasrpi: smartd alert handler (-M exec target).
 # Called by smartd as:  \$0 <device>   with the alert report on stdin.

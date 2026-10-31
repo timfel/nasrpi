@@ -101,7 +101,7 @@ $min $hour * * $dow root $cmd
     else
       # unquoted: NASRPI_SUDO is empty when already root ("$var" cmd would run "")
       $NASRPI_SUDO mkdir -p "$(dirname "$dest")"
-      $NASRPI_SUDO cp "$tmp" "$dest" && chmod 644 "$dest"
+      $NASRPI_SUDO cp "$tmp" "$dest" && $NASRPI_SUDO chmod 644 "$dest"
       ok "installed $dest"
     fi
     rm -f "$tmp"

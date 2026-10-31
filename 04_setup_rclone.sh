@@ -18,22 +18,25 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
 elif command -v rclone >/dev/null; then
   ok "rclone already installed ($(rclone version | head -1))"
 elif confirm "Install rclone now?"; then
-  apt_install rclone || curl -LsSf https://rclone.org/install.sh | bash
+  apt_install rclone || curl -LsSf https://rclone.org/install.sh | $NASRPI_SUDO bash
 else
   die "rclone is required for the rest of this script."
 fi
 
 # --- configure remotes -----------------------------------------------------------
-if confirm "Configure rclone remotes now (runs rclone config)?"; then
+# Remotes are configured for ROOT (sudo): the weekly cron job runs as root and
+# only sees root's rclone config.
+if confirm "Configure rclone remotes now (runs sudo rclone config)?"; then
   echo "  rclone's own config wizard will start; add whatever remotes you need."
-  [ "${DRY_RUN:-0}" != "1" ] && rclone config
+  echo "  (configured via sudo: the weekly sync cron runs as root and uses root's remotes)"
+  [ "${DRY_RUN:-0}" != "1" ] && $NASRPI_SUDO rclone config
 fi
 
 REMOTES=()
 if [ "${DRY_RUN:-0}" = "1" ]; then
   REMOTES=(demo_remote)                        # for testing the scripts only
 else
-  while read -r r; do [ -n "$r" ] && REMOTES+=("$r"); done < <(rclone listremotes)
+  while read -r r; do [ -n "$r" ] && REMOTES+=("$r"); done < <($NASRPI_SUDO rclone listremotes)
 fi
 if [ "${#REMOTES[@]}" -eq 0 ]; then
   warn "No remotes configured. Add one (rerun this script), then rerun again."
@@ -48,14 +51,15 @@ folder_for() {
   echo "${m:-$(derive_name "$1")}"
 }
 if [ ! -f "$MAPS_FILE" ] && { [ "${DRY_RUN:-0}" != "1" ] || [ -n "${NASRPI_DRY_ROOT:-}" ]; }; then
-  mkdir -p "$(dirname "$MAPS_FILE")"
-  : > "$MAPS_FILE.tmp"
+  tmp=$(mktemp)                        # build in /tmp, move into place with sudo
   for r in "${REMOTES[@]}"; do
     d=$(derive_name "$r")
     read -r -p "  Folder under /media/nas for '$r' [${d}]: " custom || custom=""
-    echo "${r}=${custom:-$d}" >> "$MAPS_FILE.tmp"
+    echo "${r}=${custom:-$d}" >> "$tmp"
   done
-  mkdir -p "$(dirname "$MAPS_FILE")" && mv "$MAPS_FILE.tmp" "$MAPS_FILE"
+  $NASRPI_SUDO mkdir -p "$(dirname "$MAPS_FILE")"
+  $NASRPI_SUDO mv "$tmp" "$MAPS_FILE"
+  $NASRPI_SUDO chmod 644 "$MAPS_FILE"
   ok "saved folder mapping to $MAPS_FILE (edit that file any time)"
 fi
 
@@ -70,7 +74,7 @@ fi
     # rclone copy (not sync): copies new/changed files, never deletes at target.
     echo "rclone copy --ignore-checksum --skip-links --transfers 4 --log-append /var/log/nasrpi-rclone.log '$r' '/media/nas/$folder'"
   done
-} | write_file 755 "$SYNC_BIN" || true
+} | write_file 755 "$SYNC_BIN" "sudo" || true
 
 ask_dow_hour RCLONE
 install_cron nasrpi-rclone "$RCLONE_DOW $RCLONE_HOUR $RCLONE_MIN" "$SYNC_BIN"
