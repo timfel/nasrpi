@@ -62,8 +62,7 @@ else
   done
 
   # --- first parity build -----------------------------------------------------------
-  if run_once "snapraid -c $CONF sync"; then
-    echo "  First parity build can take many hours."
+  if confirm "Build initial parity now? (can take many hours; no = do it manually later)"; then
     if [ "${DRY_RUN:-0}" != "1" ]; then
       mkdir -p /root/.snapraid "$PARITY_DIR/.snapraid"
       snapraid -c "$CONF" sync \

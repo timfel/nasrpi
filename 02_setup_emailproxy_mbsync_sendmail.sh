@@ -112,11 +112,9 @@ EOF
 fi
 
 # --- emailproxy's config file (your accounts live here) ------------------------
-if [ ! -f "$EP_ACCOUNTS_VIEW" ] || run_once "edit emailproxy accounts in $EP_ACCOUNTS"; then
-  if [ ! -f "$EP_ACCOUNTS_VIEW" ]; then
-    echo "  Creating $EP_ACCOUNTS (emailproxy's own config format)."
-    "$EP_PY" "$EP_TOOL" template | write_file 600 "$EP_ACCOUNTS" "sudo" || warn "kept existing config"
-  fi
+if [ ! -f "$EP_ACCOUNTS_VIEW" ]; then
+  echo "  Creating $EP_ACCOUNTS (emailproxy's own config format)."
+  "$EP_PY" "$EP_TOOL" template | write_file 600 "$EP_ACCOUNTS" "sudo" || warn "kept existing config"
   if [ "${DRY_RUN:-0}" != "1" ]; then
     echo "  Add your Gmail / Outlook / whatever accounts to $EP_ACCOUNTS."
     echo "  Each account needs: permission_url, token_url, oauth2_scope, client_id"
@@ -124,6 +122,8 @@ if [ ! -f "$EP_ACCOUNTS_VIEW" ] || run_once "edit emailproxy accounts in $EP_ACC
     sleep 2
     edit_file "$EP_ACCOUNTS" "sudo"
   fi
+else
+  ok "$EP_ACCOUNTS exists -- edit it directly any time, then rerun 02"
 fi
 
 # --- read that config file -----------------------------------------------------
@@ -217,7 +217,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   warn "DRY_RUN: would stop emailproxy.service, tell you to run emailproxy"
   warn "DRY_RUN: --no-gui --external-auth in a second shell, wait for you, trigger"
   warn "DRY_RUN: one IMAP login per account, and restart the service when you are done."
-else
+elif confirm "Run the OAuth sign-in flow now? (needed for new or re-auth accounts; no if tokens already work)"; then
   warn "Stopping emailproxy.service -- the OAuth prompts need a terminal of their own."
   systemctl stop emailproxy.service
   echo
@@ -262,7 +262,8 @@ default_folder() {  # tim.felgentreff@oracle.com -> oracle ; fallback: whole add
   fi
 }
 
-if run_once "write mbsync-mailbox-names to $MAPS_FILE"; then
+if [ ! -f "$MAPS_FILE" ]; then
+  echo "  Where should each account's mail live under /media/nas/Mail/?"
   maps_tmp=$(mktemp)                    # writable anywhere; moved into place with sudo below
   for a in "${ACCOUNTS[@]}"; do
     d=$(default_folder "$a")
@@ -327,9 +328,8 @@ EOF
 
 # holds the local proxy password -> keep it root-only
 if build_mbsyncrc | write_file 600 "$MBSYNCRC" "sudo"; then
-  if [ "${DRY_RUN:-0}" != "1" ] && run_once "mbsync -c $MBSYNCRC"; then
-    echo "  First sync (tokens acquired via the sign-in flow above)."
-    mbsync -c "$MBSYNCRC" -a || warn "initial sync failed (is emailproxy running?)"
+  if [ "${DRY_RUN:-0}" != "1" ] && confirm "Run mbsync now to pull mail?"; then
+    mbsync -c "$MBSYNCRC" -a || warn "sync failed (is emailproxy running?)"
   fi
 fi
 

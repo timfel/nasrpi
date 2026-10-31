@@ -172,20 +172,6 @@ write_file() {
   ok "wrote $target"
 }
 
-# run_once KEY -- remembers in ~/.nasrpi-state that a one-shot step was done
-nas_state="${NASRPI_STATE:-$HOME/.nasrpi-state}"
-run_once() {
-  local key=$1
-  grep -qxF "$key" "$nas_state" 2>/dev/null && ok "Step '${key}' previously done, skipped" && return 1
-  if confirm "Step '${key}' not done yet. Do it now? (say no to revisit later)"; then
-    mkdir -p "$(dirname "$nas_state")"; touch "$nas_state"
-    echo "$key" >> "$nas_state"
-    return 0
-  fi
-  echo "Step '${key}' previously done, skipped"
-  return 1
-}
-
 # drify PATH -- in DRY_RUN mode map a root path into the shadow root (tests)
 drify() {
   if [ "${DRY_RUN:-0}" = "1" ] && [ -n "${NASRPI_DRY_ROOT:-}" ]; then

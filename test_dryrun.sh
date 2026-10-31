@@ -10,7 +10,6 @@ T=$(mktemp -d /tmp/nasrpi-test.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 export DRY_RUN=1
 export NASRPI_DRY_ROOT="$T/root"
-export NASRPI_STATE="$T/state"
 mkdir -p "$T/bin" "$NASRPI_DRY_ROOT"
 R="$NASRPI_DRY_ROOT"          # all root-owned files land under here
 
@@ -121,9 +120,9 @@ client_id = *** your client id here ***
 [emailproxy]
 allow_catch_all_accounts = False
 CFG
-# answers: service y, edit-config y, proxy password, mailbox-names y,
+# answers: service y, proxy password (oauth flow: dry-run prints, real run asks),
 #          folder defaults (2 accounts), dow=0 hour=3 min=15, cron-install y
-runtest02_input='y\ny\nlocalproxy_pw\ny\n\n\n0\n3\n15\ny\n'
+runtest02_input='y\nlocalproxy_pw\n\n\n0\n3\n15\ny\n'
 runtest 02 "$runtest02_input" ./02_setup_emailproxy_mbsync_sendmail.sh
 check "systemd unit: our config file" "ExecStart=/opt/emailproxy/bin/emailproxy --no-gui --config-file /opt/emailproxy/accounts.ini" "$R/etc/systemd/system/emailproxy.service"
 check "accounts found from ini"    "tim.felgentreff@oracle.com" "$T/02.out"
