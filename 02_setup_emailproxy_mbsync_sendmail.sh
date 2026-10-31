@@ -41,24 +41,6 @@ SMTP_PORT=1587
 
 say "02 - emailproxy + mbsync + sendmail"
 
-# --- python (to read emailproxy's ini config) ----------------------------------
-EP_PY=""
-find_python() {
-  local cand
-  for cand in python3 python3.13 python3.12 python3.11 python; do
-    command -v "$cand" >/dev/null 2>&1 || continue
-    if "$cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then
-      EP_PY=$(command -v "$cand"); return 0
-    fi
-  done
-  return 1
-}
-if ! find_python; then
-  apt_install python3
-  find_python || die "python3 (>= 3.8) is required to read emailproxy's config file."
-fi
-ok "using $EP_PY for the emailproxy config helper"
-
 # --- uv -----------------------------------------------------------------------
 if command -v uv >/dev/null; then
   ok "uv already installed ($(uv --version))"
@@ -71,6 +53,12 @@ elif confirm "uv is not installed. Install it system-wide now?"; then
 else
   die "uv is required for the rest of this script."
 fi
+
+# --- python for the config helper ----------------------------------------------
+# No system python needed: uv fetches a managed interpreter on first use.
+# ep_py ARGS... -- run $EP_TOOL (stdlib only) through uv.
+ep_py() { uv run --no-project --quiet "$EP_TOOL" "$@"; }
+ok "running the emailproxy config helper with uv's python"
 
 # --- emailproxy ---------------------------------------------------------------
 if [ -x "$EP_BIN" ] || [ "${DRY_RUN:-0}" = "1" ]; then
@@ -115,7 +103,7 @@ fi
 # --- emailproxy's config file (your accounts live here) ------------------------
 if [ ! -f "$EP_ACCOUNTS_VIEW" ]; then
   echo "  Creating $EP_ACCOUNTS (emailproxy's own config format)."
-  "$EP_PY" "$EP_TOOL" template | write_file 600 "$EP_ACCOUNTS" "sudo" || warn "kept existing config"
+  ep_py template | write_file 600 "$EP_ACCOUNTS" "sudo" || warn "kept existing config"
   if [ "${DRY_RUN:-0}" != "1" ]; then
     echo "  Add your Gmail / Outlook / whatever accounts to $EP_ACCOUNTS."
     echo "  Each account needs: permission_url, token_url, oauth2_scope, client_id"
@@ -134,7 +122,7 @@ EP_ERR=$(mktemp)
 ep_rc=0
 ACCOUNTS=()
 # --all: also REPORT the shipped sample/placeholder sections (they stay ignored)
-ACCOUNTS_OUT=$("$EP_PY" "$EP_TOOL" accounts "$EP_ACCOUNTS_VIEW" --all 2>"$EP_ERR") || ep_rc=$?
+ACCOUNTS_OUT=$(ep_py accounts "$EP_ACCOUNTS_VIEW" --all 2>"$EP_ERR") || ep_rc=$?
 if [ -s "$EP_ERR" ]; then
   while IFS= read -r line; do warn "${line#\# }"; done < "$EP_ERR"
 fi
@@ -163,7 +151,7 @@ read_proxy_servers() {
       IMAP) IMAP_PORT=$port; IMAP_HOST=$host ;;
       SMTP) SMTP_PORT=$port; SMTP_HOST=$host ;;
     esac
-  done < <("$EP_PY" "$EP_TOOL" servers "$EP_ACCOUNTS_VIEW" 2>/dev/null || true)
+  done < <(ep_py servers "$EP_ACCOUNTS_VIEW" 2>/dev/null || true)
 }
 read_proxy_servers
 say "emailproxy local endpoints: IMAP $IMAP_HOST:$IMAP_PORT, SMTP $SMTP_HOST:$SMTP_PORT (plain text, localhost)"
@@ -209,7 +197,7 @@ elif confirm "Run the OAuth sign-in flow now? (needed for new or re-auth account
 
   for a in "${ACCOUNTS[@]}"; do
     say "Triggering login for $a -- do the sign-in in the OTHER shell if it asks"
-    if "$EP_PY" "$EP_TOOL" imap-login --host "$IMAP_HOST" --port "$IMAP_PORT" \
+    if ep_py imap-login --host "$IMAP_HOST" --port "$IMAP_PORT" \
          --user "$a" --password "$EP_PASSWORD"; then
       ok "$a: login accepted -- OAuth token in place"
     else
