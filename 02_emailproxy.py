@@ -25,8 +25,9 @@ Grounded in the real emailproxy.config layout used by simonrob/email-oauth2-prox
     client_id = ...
 
 So: accounts are sections whose heading is the e-mail address and that carry a
-token_url; local ports come from [IMAP-n]/[POP-n]/[SMTP-n] sections; the
-[emailproxy] section holds global options such as allow_catch_all_accounts.
+token_url; local ports come from [IMAP-n]/[SMTP-n] sections. nasrpi only ever
+uses IMAP + SMTP over plain text on localhost (no TLS, no POP); everything
+below reflects that.
 
 Usage:
     02_emailproxy.py accounts <config> [--all]
@@ -36,14 +37,7 @@ Usage:
         written to stderr as "# sample: <name>" so callers can report them.
 
     02_emailproxy.py servers <config>
-        one line per local server:
-        <proto>\t<local_port>\t<local_address>\t<local_starttls:on|off>\t<server_starttls:on|off>
-
-    02_emailproxy.py catchall <config>
-        True / False  (allow_catch_all_accounts in [emailproxy])
-
-    02_emailproxy.py get <config> <section-regex> <key> [--first] [--default V]
-        value(s) of <key> in every section whose name matches <section-regex>
+        one line per local IMAP/SMTP listener: <proto>\t<port>\t<local_address>
 
     02_emailproxy.py template
         print a starter config to stdout
@@ -65,8 +59,7 @@ import sys
 DOC_SECTIONS = ("server setup", "account setup", "advanced proxy configuration",
                 "emailproxy", "")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")            # account headings are addresses
-SERVER_RE = re.compile(r"^(IMAP|POP|SMTP)-(\d+)$", re.IGNORECASE)
-TRUE_RE = re.compile(r"^(1|y|yes|true|on)$", re.IGNORECASE)
+SERVER_RE = re.compile(r"^(IMAP|SMTP)-(\d+)$", re.IGNORECASE)
 
 TEMPLATE = """# emailproxy (Email OAuth 2.0 Proxy) configuration -- managed by nasrpi 02.
 # Format: docs.python.org/library/configparser#supported-ini-file-structure
@@ -74,10 +67,11 @@ TEMPLATE = """# emailproxy (Email OAuth 2.0 Proxy) configuration -- managed by n
 # Do NOT commit this file to a public repository: the proxy caches OAuth tokens here.
 
 [Server setup]
-documentation = Local servers: [IMAP-<port>] / [POP-<port>] / [SMTP-<port>] say which
-    local port the proxy listens on and which remote server it proxies. Email clients
-    (mbsync, msmtp) connect to these local ports UNENCRYPTED with any password; the
-    proxy does the real TLS + OAuth 2.0 conversation upstream.
+documentation = Local servers: [IMAP-<port>] / [SMTP-<port>] say which local
+    port the proxy listens on and which remote server it proxies. Email clients
+    (mbsync, msmtp) connect to these local ports on 127.0.0.1 UNENCRYPTED with
+    the local password set in 02; the proxy does the real TLS + OAuth 2.0
+    conversation upstream. nasrpi uses IMAP and SMTP only (no POP).
 
 [IMAP-1993]
 server_address = imap.gmail.com
@@ -99,7 +93,7 @@ documentation = One section per account, heading = the e-mail address. Required 
 #[your.email@outlook.com]
 #permission_url = https://login.microsoftonline.com/common/oauth2/v2.0/authorize
 #token_url = https://login.microsoftonline.com/common/oauth2/v2.0/token
-#oauth2_scope = https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/POP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access
+#oauth2_scope = https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access
 #redirect_uri = http://localhost
 #client_id = *** client id here ***
 
@@ -134,10 +128,6 @@ def parse(path):
     return cfg
 
 
-def is_true(value):
-    return bool(value) and bool(TRUE_RE.match(str(value).strip()))
-
-
 def is_sample(cfg, section):
     """True if a section is still a shipped example (some value is `*** ... ***`).
 
@@ -154,7 +144,7 @@ def account_sections(cfg, include_samples=False):
 
     An account section is a section whose heading is an e-mail address and that
     carries a `token_url`. Catch-all headings such as [@domain.com] are not
-    returned (see the `catchall` command for allow_catch_all_accounts).
+    returned (they are not enumerable anyway).
     """
     real, sample = [], []
     for name in cfg.sections():
@@ -172,32 +162,15 @@ def account_sections(cfg, include_samples=False):
 
 
 def server_rows(cfg):
-    """Local proxy servers declared as [IMAP-1993] / [POP-1995] / [SMTP-1587]."""
+    """Local proxy listeners declared as [IMAP-1993] / [SMTP-1587]."""
     rows = []
     for name in cfg.sections():
         match = SERVER_RE.match(re.sub(r"\s+", "", name))
         if not match:
             continue
-        section = cfg[name]
-        local_addr = (section.get("local_address") or "").strip() or "127.0.0.1"
-        rows.append((match.group(1).upper(), int(match.group(2)),
-                     local_addr,
-                     "on" if is_true((section.get("local_starttls") or "")) else "off",
-                     "on" if is_true((section.get("server_starttls") or "")) else "off"))
+        local_addr = (cfg[name].get("local_address") or "").strip() or "127.0.0.1"
+        rows.append((match.group(1).upper(), int(match.group(2)), local_addr))
     return sorted(rows, key=lambda r: (r[0], r[1]))
-
-
-def get_values(cfg, section_re, key, default=None, first=False):
-    pattern = re.compile(section_re)
-    found = []
-    for name in cfg.sections():
-        if pattern.search(name) and cfg.has_option(name, key):
-            found.append(cfg.get(name, key).strip())
-            if first:
-                break
-    if default is not None and not found:
-        found = [default]
-    return found
 
 
 def main(argv):
@@ -227,37 +200,9 @@ def main(argv):
 
     if cmd == "servers":
         rows = server_rows(cfg)
-        for proto, port, local_addr, local_tls, server_tls in rows:
-            print(f"{proto}\t{port}\t{local_addr}\t{local_tls}\t{server_tls}")
+        for proto, port, local_addr in rows:
+            print(f"{proto}\t{port}\t{local_addr}")
         return 0 if rows else 3
-
-    if cmd == "catchall":
-        raw = cfg.get("emailproxy", "allow_catch_all_accounts", fallback="False")
-        first_line = next((ln.strip() for ln in str(raw).splitlines() if ln.strip()), "False")
-        print("True" if is_true(first_line) else "False")
-        return 0
-
-    if cmd == "get":
-        if len(argv) < 5:
-            sys.stderr.write("nasrpi: usage: get <config> <section-regex> <key> "
-                             "[--first] [--default VALUE]\n")
-            return 2
-        section_re, key = argv[3], argv[4]
-        first, default, pending = False, None, False
-        for arg in argv[5:]:
-            if pending:
-                default, pending = arg, False
-            elif arg == "--first":
-                first = True
-            elif arg == "--default":
-                pending = True
-            else:
-                sys.stderr.write(f"nasrpi: unknown get option '{arg}'\n")
-                return 2
-        found = get_values(cfg, section_re, key, default=default, first=first)
-        for value in found:
-            print(value.splitlines()[0].strip() if value else "")
-        return 0 if found else 3
 
     sys.stderr.write(f"nasrpi: unknown emailproxy config command '{cmd}'\n")
     return 2

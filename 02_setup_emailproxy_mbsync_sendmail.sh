@@ -4,17 +4,20 @@
 # - systemd service: emailproxy --no-gui at boot, using OUR config file
 # - interactive: add your mail accounts to emailproxy's config file.
 #   $EP_ACCOUNTS uses emailproxy's own config format (emailproxy.config):
-#     [IMAP-1993] / [POP-1995] / [SMTP-1587]  -> local listener + upstream server
+#     [IMAP-1993] / [SMTP-1587]               -> local listener + upstream server
 #     [you@example.com]                       -> one section per mail account
-#   Everything below is driven by that file: accounts, local ports, TLS mode.
+#   Everything below is driven by that file: accounts and local ports.
 # - OAuth sign-in: you run emailproxy --external-auth yourself in a second
 #   shell; this script stops the service, triggers one IMAP login per account
 #   (each login makes the proxy show its OAuth prompts in your other shell),
-#   and restarts the service when you are done. No state tracking -- rerun 02
-#   any time an account needs (re)authentication.
+#   and restarts the service when you are done. Rerun 02 any time an account
+#   needs (re)authentication.
 # - mbsync pulling via emailproxy into /media/nas/Mail/<MAILBOX> (down only)
 # - weekly cron for mbsync (skips when /media/nas is not mounted)
 # - sendmail via msmtp + msmtp-mta, relaying through emailproxy's SMTP port
+#
+# nasrpi only ever talks IMAP + SMTP to the proxy, plain text on localhost
+# (the proxy does all upstream TLS itself) -- no local TLS, no POP.
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./lib.sh
@@ -35,8 +38,6 @@ IMAP_HOST=127.0.0.1
 SMTP_HOST=127.0.0.1
 IMAP_PORT=1993
 SMTP_PORT=1587
-IMAP_TLS=off
-SMTP_TLS=off
 
 say "02 - emailproxy + mbsync + sendmail"
 
@@ -154,57 +155,34 @@ if [ "${#ACCOUNTS[@]}" -eq 0 ]; then
 fi
 say "Mail accounts in emailproxy config: ${ACCOUNTS[*]}"
 
-ep_catchall=$("$EP_PY" "$EP_TOOL" catchall "$EP_ACCOUNTS_VIEW" 2>/dev/null || echo False)
-if [ "$ep_catchall" = "True" ]; then
-  warn "allow_catch_all_accounts is on: accounts the proxy creates on the fly are not"
-  warn "seen here -- rerun 02 after new accounts show up in $EP_ACCOUNTS."
-fi
-
 # --- local proxy endpoints, from the config's server sections ------------------
-IMAP_PORT_SET=""; SMTP_PORT_SET=""; POP_PORT=""
 read_proxy_servers() {
-  local proto port host local_tls server_tls
-  while IFS=$'\t' read -r proto port host local_tls server_tls; do
+  local proto port host
+  while IFS=$'\t' read -r proto port host; do
     case "$proto" in
-      IMAP) if [ -z "$IMAP_PORT_SET" ]; then
-              IMAP_PORT=$port; IMAP_HOST=$host; IMAP_TLS=$local_tls; IMAP_PORT_SET=1
-            fi ;;
-      SMTP) if [ -z "$SMTP_PORT_SET" ]; then
-              SMTP_PORT=$port; SMTP_HOST=$host; SMTP_TLS=$local_tls; SMTP_PORT_SET=1
-            fi ;;
-      POP)  POP_PORT=$port ;;
+      IMAP) IMAP_PORT=$port; IMAP_HOST=$host ;;
+      SMTP) SMTP_PORT=$port; SMTP_HOST=$host ;;
     esac
   done < <("$EP_PY" "$EP_TOOL" servers "$EP_ACCOUNTS_VIEW" 2>/dev/null || true)
-  if [ -n "$POP_PORT" ]; then
-    warn "POP3 listener on $POP_PORT in the proxy config -- nasrpi syncs via IMAP only."
-  fi
-  if [ -z "$IMAP_PORT_SET" ]; then
-    warn "No [IMAP-<port>] server in $EP_ACCOUNTS -- assuming $IMAP_HOST:$IMAP_PORT."
-  fi
-  if [ -z "$SMTP_PORT_SET" ]; then
-    warn "No [SMTP-<port>] server in $EP_ACCOUNTS -- assuming $SMTP_HOST:$SMTP_PORT."
-  fi
 }
 read_proxy_servers
-say "emailproxy local endpoints: IMAP $IMAP_HOST:$IMAP_PORT (tls $IMAP_TLS), SMTP $SMTP_HOST:$SMTP_PORT (tls $SMTP_TLS)"
-if [ "$IMAP_TLS" = "on" ] || [ "$SMTP_TLS" = "on" ]; then
-  warn "local_starttls is enabled in the proxy config: mbsync/msmtp are set to STARTTLS"
-  warn "-- make sure the proxy's local certificate is trusted by them."
-fi
+say "emailproxy local endpoints: IMAP $IMAP_HOST:$IMAP_PORT, SMTP $SMTP_HOST:$SMTP_PORT (plain text, localhost)"
 
 # --- the local proxy login password --------------------------------------------
 # The proxy authenticates upstream with OAuth 2.0; this password is only used
 # locally (mbsync/msmtp -> proxy) and to encrypt the cached tokens, so a single
-# shared value for all accounts keeps things simple (see the sample config notes).
+# shared value for all accounts keeps things simple. emailproxy refuses logins
+# without a password, so this is mandatory.
 EP_PASSWORD=""
 if [ -f "$MSMTPRC_VIEW" ]; then
   EP_PASSWORD=$(grep -m1 '^password ' "$MSMTPRC_VIEW" 2>/dev/null | cut -d' ' -f2-) || true
 fi
 if [ -z "$EP_PASSWORD" ] || confirm "Proxy login password on record. Re-enter it?"; then
   echo "  Local emailproxy login password (any value; it protects cached tokens)."
-  read -r -s -p "  Password (empty = clients connect without AUTH): " EP_PASSWORD || EP_PASSWORD=""
+  read -r -s -p "  Password: " EP_PASSWORD || EP_PASSWORD=""
   echo
 fi
+[ -n "$EP_PASSWORD" ] || die "emailproxy requires a local login password -- nothing entered."
 
 # --- OAuth sign-in: you run emailproxy in a SECOND shell -----------------------
 # emailproxy only shows its OAuth prompts in the terminal it owns, so this
@@ -212,7 +190,7 @@ fi
 # start the proxy in a second shell, then triggers one IMAP login per account:
 # each login makes the proxy print its OAuth URL and prompt for the paste-back
 # in YOUR other shell, where you do the browser flow. "Login accepted" == that
-# account has a working token. No state tracking -- rerun 02 any time.
+# account has a working token. Rerun 02 any time an account needs re-auth.
 if [ "${DRY_RUN:-0}" = "1" ]; then
   warn "DRY_RUN: would stop emailproxy.service, tell you to run emailproxy"
   warn "DRY_RUN: --no-gui --external-auth in a second shell, wait for you, trigger"
@@ -288,8 +266,7 @@ folder_for() {  # stored folder name for an account, fresh default if unmapped
 build_mbsyncrc() {
   echo "# Managed by nasrpi setup scripts."
   echo "# Accounts live in emailproxy's config ($EP_ACCOUNTS); rerun 02 after changing them."
-  local a name dest imap_ssl
-  imap_ssl=$([ "$IMAP_TLS" = "on" ] && echo STARTTLS || echo None)
+  local a name dest
   for a in "${ACCOUNTS[@]}"; do
     name=$(printf '%s' "$a" | tr -c 'A-Za-z0-9_-' '_')   # mbsync-safe name
     dest=$(folder_for "$a")
@@ -301,11 +278,10 @@ Host $IMAP_HOST
 Port $IMAP_PORT
 User $a
 # emailproxy's local login password (see 02); '*' would prompt -> cron would fail.
-Pass ${EP_PASSWORD:-*}
+Pass $EP_PASSWORD
 AuthMechs LOGIN
-# The proxy talks plain text locally and does the upstream TLS itself;
-# STARTTLS only when the proxy config sets local_starttls = True.
-SSLType $imap_ssl
+# Plain text to the proxy on localhost; the proxy does the upstream TLS itself.
+SSLType None
 
 IMAPStore $name-remote
 Account $name
@@ -365,25 +341,22 @@ fi
 build_msmtprc() {
   echo "# Managed by nasrpi setup scripts (02); rerun 02 to regenerate."
   echo "defaults"
-  # localhost <-> proxy is plain text; the proxy TLS-wraps the real upstream.
-  if [ "$SMTP_TLS" = "on" ]; then echo "tls starttls"; else echo "tls off"; fi
+  # Plain text to the proxy on localhost; the proxy TLS-wraps the real upstream.
+  echo "tls off"
   echo
   echo "account emailproxy"
   echo "host $SMTP_HOST"
   echo "port $SMTP_PORT"
   echo "from $smtp_account"
-  if [ -n "$EP_PASSWORD" ]; then
-    echo "auth on"
-    echo "user $smtp_account"
-    echo "password $EP_PASSWORD"
-  else
-    echo "auth off"
-  fi
+  # emailproxy always requires a password (checked above).
+  echo "auth on"
+  echo "user $smtp_account"
+  echo "password $EP_PASSWORD"
   echo
   echo "account default : emailproxy"
 }
 if [ ! -f "$MSMTPRC_VIEW" ] || confirm "Existing msmtp config found. Replace it?"; then
-  build_msmtprc | write_file 600 "$MSMTPRC" "sudo"# || warn "kept existing msmtp config"
+  build_msmtprc | write_file 600 "$MSMTPRC" "sudo" || warn "kept existing msmtp config"
 fi
 if [ "${DRY_RUN:-0}" != "1" ]; then
   # sanity check: does it actually talk to emailproxy?
