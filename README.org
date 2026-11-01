@@ -20,7 +20,7 @@ missing, and asks before touching anything. Shared helpers live in ~lib.sh~
 *** 01 — Mount points
 
 Puts your four disks into =/etc/fstab= (by UUID) at =/media/media=,
-=/media/media_parity=, =/media/nas= and =/media/nas_backup=. Guides you through
+=/media/media_backup=, =/media/nas= and =/media/nas_backup=. Guides you through
 picking disks by name/size, previews the fstab edit, and backs up fstab first.
 
 *** 02 — emailproxy, mbsync, sendmail
@@ -72,7 +72,7 @@ when =/media/nas= is unmounted.
 Installs a weekly cron job running ~rsync -a --delete~ for two pairs:
 
 - ~/media/nas/ → /media/nas_backup=~
-- ~/media/media/ → /media/media_parity=~
+- ~/media/media/ → /media/media_backup=~
 
 Per pair it dry-runs first; if more than N% of destination files would be
 deleted, it aborts that pair and *sends you a report*. Also mails on failure.
@@ -135,7 +135,7 @@ UUID=960d7f19-9d20-47ec-8aa0-18b962e1671b /media/laptop1t   ext4     defaults,us
 UUID=9f83aad5-4997-44be-8562-ea529cd3e586 /media/fullsize2t ext4     defaults,users,noatime   0       0
 UUID=78247AAC247A6D4E                     /media/mybook16t  ntfs-3g  defaults,users,noatime,uid=1000,gid=1000,umask=0002   0       0
 /media/mybook12t                   /media/media        none           defaults,users,bind,nofail 0 0
-/media/mybook16t                   /media/media_parity none           defaults,users,bind,nofail 0 0
+/media/mybook16t                   /media/media_backup none           defaults,users,bind,nofail 0 0
 /media/mybook3t                    /media/nas          none           defaults,users,bind,nofail 0 0
 /media/laptop1t:/media/fullsize2t  /media/nas_backup   fuse.mergerfs  defaults,users,nofail,allow_other,cache.files=off,dropcacheonclose=true,category.create=mfs,moveonenospc=true,minfreespace=4G,fsname=mergerfs  0  0
 #+end_src

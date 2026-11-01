@@ -100,6 +100,16 @@ EOF
   fi
 fi
 
+# helper used by both enable and restore paths below
+ensure_proxy_listening() {
+  [ "${DRY_RUN:-0}" = "1" ] && return 0
+  if wait_port "$SMTP_HOST" "$SMTP_PORT"; then
+    ok "emailproxy listening on $SMTP_HOST:$SMTP_PORT"
+  else
+    warn "emailproxy not answering on $SMTP_HOST:$SMTP_PORT yet -- check: systemctl status emailproxy"
+  fi
+}
+
 # --- emailproxy's config file (your accounts live here) ------------------------
 if [ ! -f "$EP_ACCOUNTS_VIEW" ]; then
   echo "  Creating $EP_ACCOUNTS (emailproxy's own config format)."
@@ -142,6 +152,21 @@ if [ "${#ACCOUNTS[@]}" -eq 0 ]; then
   exit 0
 fi
 say "Mail accounts in emailproxy config: ${ACCOUNTS[*]}"
+
+# wait_port HOST PORT -- block until the proxy listens (systemd start is async;
+# without this, test sends right after a restart hit a port that isn't bound yet).
+# Plain bash TCP connect: closes immediately, no login/protocol side effects.
+wait_port() {
+  local i
+  for i in $(seq 1 20); do
+    if (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; then
+      exec 3<&- 3>&-
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
 
 # --- local proxy endpoints, from the config's server sections ------------------
 read_proxy_servers() {
@@ -207,8 +232,10 @@ elif confirm "Run the OAuth sign-in flow now? (needed for new or re-auth account
 
   echo
   read -r -p "  Finished? Ctrl-C the proxy in the other shell, then press Enter here... " _ || true
-  if $NASRPI_SUDO systemctl start emailproxy.service 2>/dev/null; then
+  sleep 2                                # let the external-auth proxy release the ports
+  if $NASRPI_SUDO systemctl start emailproxy.service; then
     ok "emailproxy.service restored"
+    ensure_proxy_listening
   else
     warn "could not start emailproxy.service -- start it manually"
   fi
@@ -269,34 +296,54 @@ User $a
 Pass $EP_PASSWORD
 AuthMechs LOGIN
 # Plain text to the proxy on localhost; the proxy does the upstream TLS itself.
+# SSLType (not TLSType): works on old AND new isync -- new ones only print a
+# deprecation notice, while old ones reject TLSType as an unrecognized keyword.
 SSLType None
 
 IMAPStore $name-remote
 Account $name
 
 MaildirStore $name-local
+SubFolders Verbatim
 Path /media/nas/Mail/$dest/
 Inbox /media/nas/Mail/$dest/INBOX
-Type Maildir
-Format Maildir
 
 Channel $name
-Master $name-remote
-Slave $name-local
+# Store refs need the :store: form -- bare names are a "malformed mailbox spec".
+Far :$name-remote:
+Near :$name-local:
+Patterns *
+Create Both
+Expunge Near
+CopyArrivalDate yes
+SyncState *
 # Down only: pull new/changed mail, never push local changes upstream.
 Sync Pull
-Expunge Slave
-New Remote
-CopyArrivalDate yes
 EOF
   done
 }
 
 # holds the local proxy password -> keep it root-only
-if build_mbsyncrc | write_file 600 "$MBSYNCRC" "sudo"; then
+# force: the write itself must not re-prompt after any earlier confirm; a
+# declined/dropped write used to silently skip mbsync setup entirely.
+if build_mbsyncrc | write_file 600 "$MBSYNCRC" "sudo" force; then
+  # mbsync creates mailboxes, but NOT the store Path itself -- without these
+  # dirs the very first sync dies with "Maildir error: cannot open store".
+  if [ "${DRY_RUN:-0}" != "1" ]; then
+    if mountpoint -q /media/nas; then
+      for a in "${ACCOUNTS[@]}"; do
+        $NASRPI_SUDO mkdir -p "/media/nas/Mail/$(folder_for "$a")/INBOX"/{new,cur,tmp}
+      done
+      ok "mail store folders ready under /media/nas/Mail/"
+    else
+      warn "/media/nas is not mounted -- cannot create mail folders there; mount it and rerun 02"
+    fi
+  fi
   if [ "${DRY_RUN:-0}" != "1" ] && confirm "Run mbsync now to pull mail?"; then
     $NASRPI_SUDO mbsync -c "$MBSYNCRC" -a || warn "sync failed (is emailproxy running?)"
   fi
+else
+  warn "$MBSYNCRC not updated -- mbsync setup skipped; rerun 02 to apply"
 fi
 
 # --- weekly mbsync cron (down only, skips when nas not mounted) -----------------
@@ -330,31 +377,40 @@ build_msmtprc() {
   echo "# Managed by nasrpi setup scripts (02); rerun 02 to regenerate."
   echo "defaults"
   # Plain text to the proxy on localhost; the proxy TLS-wraps the real upstream.
+  # With tls off, msmtp's automatic auth selection rejects cleartext methods --
+  # pick PLAIN explicitly or sending fails before it even connects.
+  echo "auth plain"
   echo "tls off"
   echo
   echo "account emailproxy"
   echo "host $SMTP_HOST"
   echo "port $SMTP_PORT"
   echo "from $smtp_account"
-  # emailproxy always requires a password (checked above).
-  echo "auth on"
+  # emailproxy always requires a password (checked above); auth comes from
+  # "defaults" (auth plain).
   echo "user $smtp_account"
   echo "password $EP_PASSWORD"
   echo
   echo "account default : emailproxy"
 }
 if [ ! -f "$MSMTPRC_VIEW" ] || confirm "Existing msmtp config found. Replace it?"; then
-  build_msmtprc | write_file 600 "$MSMTPRC" "sudo" || warn "kept existing msmtp config"
+  # "force": don't let write_file ask a second time (the extra prompt ate the
+  # answer in piped sessions and left /etc/msmtprc untouched)
+  build_msmtprc | write_file 600 "$MSMTPRC" "sudo" force || warn "kept existing msmtp config"
 fi
 if [ "${DRY_RUN:-0}" != "1" ]; then
   # sanity check: does it actually talk to emailproxy?
   if confirm "Send a test mail to $smtp_account to verify?"; then
+    ensure_proxy_listening
+    err=$(mktemp)
     if { echo "To: $smtp_account"; echo "Subject: nasrpi test mail"; echo; echo "test"; } \
-         | $NASRPI_SUDO sendmail -t 2>/dev/null; then
+         | $NASRPI_SUDO sendmail -t 2>"$err"; then
       ok "sendmail (msmtp) relays through emailproxy as $smtp_account"
     else
       warn "test send failed -- check $MSMTPRC and that emailproxy is running"
+      sed 's/^/      /' "$err"          # show msmtp's real error, don't swallow it
     fi
+    rm -f "$err"
   fi
 fi
 

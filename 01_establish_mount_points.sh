@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 01_establish_mount_points.sh
 # Ensure the four data disks are in /etc/fstab (by UUID) under
-# /media/media, /media/media_parity, /media/nas, /media/nas_backup.
+# /media/media, /media/media_backup, /media/nas, /media/nas_backup.
 # Idempotent: existing mount points are only re-confirmed, never clobbered.
 set -euo pipefail
 cd "$(dirname "$0")"

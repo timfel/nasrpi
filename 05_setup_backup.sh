@@ -2,7 +2,7 @@
 # 05_setup_backup.sh
 # Weekly cron: rsync backups of
 #   /media/nas   -> /media/nas_backup
-#   /media/media -> /media/media_parity
+#   /media/media -> /media/media_backup
 # For each pair:
 # - skips when either side is not mounted
 # - skips (and mails a report) when more than N% of dest files would be deleted
@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ./lib.sh
 
-say "05 - backup /media/nas -> /media/nas_backup and /media/media -> /media/media_parity"
+say "05 - backup /media/nas -> /media/nas_backup and /media/media -> /media/media_backup"
 apt_install rsync
 # sendmail comes from msmtp-mta (installed by 02); warn if it is missing.
 [ "${DRY_RUN:-0}" = "1" ] || command -v sendmail >/dev/null \
@@ -33,7 +33,7 @@ DELETE_PCT="$DELETE_PCT"
 # one "source dest" pair per line (trailing slashes are added automatically):
 PAIRS="
 /media/nas /media/nas_backup
-/media/media /media/media_parity
+/media/media /media/media_backup
 "
 LOG=/var/log/nasrpi-backup.log
 

@@ -7,7 +7,7 @@
 #   NASRPI_CRON_DIR=path ... override /etc/cron.d location
 #   NASRPI_ETC_DIR=path  ... override /etc location for generated configs
 
-NASRPI_MOUNTS=(/media/media /media/media_parity /media/nas /media/nas_backup)
+NASRPI_MOUNTS=(/media/media /media/media_backup /media/nas /media/nas_backup)
 NASRPI_CRON_DIR="${NASRPI_CRON_DIR:-/etc/cron.d}"
 NASRPI_ETC_DIR="${NASRPI_ETC_DIR:-/etc}"
 NASRPI_FSTAB="${NASRPI_FSTAB:-/etc/fstab}"
@@ -127,9 +127,12 @@ apt_install() {
   "$NASRPI_SUDO" apt-get install "${missing[@]}"
 }
 
-# write_file MODE TARGET [sudo]  ...content on stdin (idempotent: skips if identical)
+# write_file MODE TARGET [sudo] [force]  ...content on stdin (idempotent: skips if identical)
+# force="force": replace a differing file without the extra confirm prompt
+# (caller already asked -- avoids double-confirmation, which ate "y" answers
+# and silently left files untouched in piped sessions).
 write_file() {
-  local mode=$1 target=$2 usesudo=${3:-} tmp target_cmp
+  local mode=$1 target=$2 usesudo=${3:-} force=${4:-} tmp target_cmp
   # in DRY_RUN with a shadow root, compare/inspect the shadow copy instead
   if [ "${DRY_RUN:-0}" = "1" ] && [ -n "${NASRPI_DRY_ROOT:-}" ]; then
     target_cmp="$NASRPI_DRY_ROOT$target"
@@ -142,13 +145,17 @@ write_file() {
     ok "$target already up to date"
     rm -f "$tmp"; return 0
   fi
-  if [ -f "$target_cmp" ] && ! confirm "Existing $target differs. Show diff and replace?"; then
+  if [ -f "$target_cmp" ] && [ "$force" != "force" ] && ! confirm "Existing $target differs. Show diff and replace?"; then
     warn "left $target untouched"
     rm -f "$tmp"; return 1
   fi
   if [ -f "$target_cmp" ]; then
     echo "--- current $target"
-    diff -u "$target_cmp" "$tmp" | sed 's/^/    /' || true
+    if [ -r "$target_cmp" ]; then
+      diff -u "$target_cmp" "$tmp" | sed 's/^/    /' || true
+    elif [ -n "$usesudo" ] && [ -n "$NASRPI_SUDO" ]; then
+      $NASRPI_SUDO diff -u "$target_cmp" "$tmp" | sed 's/^/    /' || true
+    fi   # unreadable and no sudo available -> skip the diff display
   fi
   if [ "${DRY_RUN:-0}" = "1" ]; then
     if [ -n "${NASRPI_DRY_ROOT:-}" ]; then   # tests: write into a shadow tree

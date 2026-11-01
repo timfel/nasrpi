@@ -14,7 +14,7 @@
 01
    - ensure that i have disks by uuid in etc fstab that mount under
      * =/media/media=
-     * =/media/media_parity=
+     * =/media/media_backup=
      * =/media/nas=
      * =/media/nas_backup=
        + if they are not there, guide me by pointing out which disks i have,
@@ -46,7 +46,7 @@
      should run; should just skip if the target is not mounted
 05
    - setup a weekly cron job that runs rsync backup from =/media/nas= to
-     =/media/nas_backup= and from =/media/media= to =/media/media_parity=, ask
+     =/media/nas_backup= and from =/media/media= to =/media/media_backup=, ask
      me what time of day and what weekday it should run; should just skip if the
      target is not mounted; should skip if more than N% files would be deleted;
      it should =sendmail= a report if it failed in that case

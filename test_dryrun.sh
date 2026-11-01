@@ -37,6 +37,13 @@ chmod +x "$T/bin/lsblk" "$T/bin/blkid"
 export PATH="$T/bin:$PATH"
 
 pass=0; fail=0
+checknot() {  # checknot NAME REGEXP FILE -- pass when pattern is ABSENT
+  if grep -qE -- "$2" "$3" 2>/dev/null; then
+    echo "  FAIL: $1   (must not contain /$2/ in $3)"; fail=$((fail+1))
+  else
+    echo "  PASS: $1"; pass=$((pass+1))
+  fi
+}
 check() {  # check <desc> <fixed-string> <file>
   if grep -qF -- "$2" "$3" 2>/dev/null; then
     echo "  PASS: $1"; pass=$((pass+1))
@@ -57,7 +64,7 @@ echo "=== 01 fresh fstab: guided assignment"
 runtest 01 '1\ny\n1\ny\n1\ny\n1\ny\ny\n' ./01_establish_mount_points.sh
 F="$R/etc/fstab"
 check "fstab entry /media/media"         "0sda  /media/media  ext4"  "$F"
-check "fstab entry /media/media_parity"  "0sdb  /media/media_parity  ext4" "$F"
+check "fstab entry /media/media_backup"  "0sdb  /media/media_backup  ext4" "$F"
 check "fstab entry /media/nas"           "0sdc  /media/nas  ext4"    "$F"
 check "fstab entry /media/nas_backup"    "0sdd  /media/nas_backup  ext4" "$F"
 
@@ -133,6 +140,14 @@ check "mbsyncrc: gmail account"    "IMAPAccount timfelgentreff_gmail_com"   "$R/
 check "mbsyncrc: real user name"   "User tim.felgentreff@oracle.com"         "$R/etc/mbsyncrc"
 check "mbsyncrc: proxy imap port"  "Port 1993"                          "$R/etc/mbsyncrc"
 check "mbsyncrc: plain to proxy"   "SSLType None"                       "$R/etc/mbsyncrc"
+checknot "mbsyncrc: no new-only TLSType" "^TLSType"                      "$R/etc/mbsyncrc"
+check "mbsyncrc: colon store spec" "Far :tim_felgentreff_oracle_com-remote:" "$R/etc/mbsyncrc"
+check "mbsyncrc: near store spec"  "Near :tim_felgentreff_oracle_com-local:" "$R/etc/mbsyncrc"
+check "mbsyncrc: subfolders"       "SubFolders Verbatim"                   "$R/etc/mbsyncrc"
+checknot "mbsyncrc: no bogus Type"    "^Type Maildir"                    "$R/etc/mbsyncrc"
+checknot "mbsyncrc: no Format kw"     "^Format "                           "$R/etc/mbsyncrc"
+checknot "mbsyncrc: no bare New kw"   "^New "                            "$R/etc/mbsyncrc"
+checknot "mbsyncrc: no Master/Slave" "^Master "                           "$R/etc/mbsyncrc"
 check "mbsyncrc: proxy password"   "Pass localproxy_pw"                "$R/etc/mbsyncrc"
 check "mbsyncrc: LOGIN auth"       "AuthMechs LOGIN"                    "$R/etc/mbsyncrc"
 check "mbsyncrc: down only"        "Sync Pull"                          "$R/etc/mbsyncrc"
@@ -147,7 +162,16 @@ check "msmtprc: from account"      "from tim.felgentreff@oracle.com"     "$R/etc
 check "msmtprc: proxy password"    "password localproxy_pw"              "$R/etc/msmtprc"
 check "msmtprc: default account"   "account default : emailproxy"        "$R/etc/msmtprc"
 check "oauth flow described"       "IMAP login per account"            "$T/02.out"
-check "msmtprc: auth on"           "auth on"                             "$R/etc/msmtprc"
+# real-parser smoke test (when isync is installed): no config parse errors
+if command -v mbsync >/dev/null 2>&1; then
+  if mbsync -c "$R/etc/mbsyncrc" -n -a 2>&1 | grep -qE "not recognized|malformed"; then
+    echo "  FAIL: mbsync rejects generated config"; fail=$((fail+1))
+  else
+    echo "  PASS: generated mbsyncrc parses (isync)"; pass=$((pass+1))
+  fi
+fi
+check "msmtprc: explicit plain auth" "auth plain"                        "$R/etc/msmtprc"
+checknot "msmtprc: no auto auth"    "^auth on"                            "$R/etc/msmtprc"
 
 echo "=== 02 rerun: idempotent, no re-prompts"
 sum_before=$(md5sum "$R/etc/mbsyncrc")
@@ -190,7 +214,7 @@ check "backup cron installed"     "nasrpi-backup.sh"           "$R/etc/cron.d/na
 check "backup cron schedule"      "30 2 * * 1 root"            "$R/etc/cron.d/nasrpi-backup"
 check "delete limit carried over" "DELETE_PCT=\"5\""            "$BK"
 check "nas backup pair"           "/media/nas /media/nas_backup"       "$BK"
-check "media backup pair"         "/media/media /media/media_parity"   "$BK"
+check "media backup pair"         "/media/media /media/media_backup"   "$BK"
 check "safety dry-run first"      "rsync -an"                  "$BK"
 check "rsync delete mode"         "rsync -a --delete"          "$BK"
 check "mails when skipping"       "SKIPPED"                    "$BK"
@@ -211,14 +235,14 @@ cat >> "$T/mail.out"
 EOF
 chmod +x "$SB/bin/mountpoint" "$SB/bin/sendmail"
 cp "$BK" "$SB/run-backup.sh"
-sed "s|^/media/nas /media/nas_backup\$|$T/fsrc $SB/dest|; s|^/media/media /media/media_parity\$|$SB/fmedia $SB/fparity|; s|^LOG=.*|LOG=$SB/backup.log|" "$BK" > "$SB/run-backup.sh"
+sed "s|^/media/nas /media/nas_backup\$|$T/fsrc $SB/dest|; s|^/media/media /media/media_backup\$|$SB/fmedia $SB/fbackup|; s|^LOG=.*|LOG=$SB/backup.log|" "$BK" > "$SB/run-backup.sh"
 
 # scenario A: dest has 100 old files, src has 20 -> 100% deletions -> must SKIP + mail
 # (the second, media pair runs alongside with identical dirs -> clean)
-mkdir -p "$T/fsrc" "$SB/fmedia" "$SB/fparity"
+mkdir -p "$T/fsrc" "$SB/fmedia" "$SB/fbackup"
 for i in $(seq 1 20);  do echo new > "$T/fsrc/file$i"; done
 for i in $(seq 1 100); do echo old > "$SB/dest/old$i"; done
-for i in $(seq 1 5);  do echo media > "$SB/fmedia/m$i"; cp "$SB/fmedia/m$i" "$SB/fparity/"; done
+for i in $(seq 1 5);  do echo media > "$SB/fmedia/m$i"; cp "$SB/fmedia/m$i" "$SB/fbackup/"; done
 if PATH="$SB/bin:$PATH" bash "$SB/run-backup.sh" > "$T/05a.out" 2>&1; then
   echo "  FAIL: should have skipped"; fail=$((fail+1))
 else
@@ -242,10 +266,10 @@ if diff -r "$T/fsrc" "$SB/dest" >/dev/null 2>&1; then
 else
   echo "  FAIL: dest does not mirror src"; fail=$((fail+1))
 fi
-if diff -r "$SB/fmedia" "$SB/fparity" >/dev/null 2>&1; then
-  echo "  PASS: media_parity mirrors media after backup"; pass=$((pass+1))
+if diff -r "$SB/fmedia" "$SB/fbackup" >/dev/null 2>&1; then
+  echo "  PASS: media_backup mirrors media after backup"; pass=$((pass+1))
 else
-  echo "  FAIL: media_parity does not mirror media"; fail=$((fail+1))
+  echo "  FAIL: media_backup does not mirror media"; fail=$((fail+1))
 fi
 
 echo "=== 03b: actually RUN the smartd alert handler"
