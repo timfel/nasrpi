@@ -189,6 +189,8 @@ BK="$R/usr/local/bin/nasrpi-backup.sh"
 check "backup cron installed"     "nasrpi-backup.sh"           "$R/etc/cron.d/nasrpi-backup"
 check "backup cron schedule"      "30 2 * * 1 root"            "$R/etc/cron.d/nasrpi-backup"
 check "delete limit carried over" "DELETE_PCT=\"5\""            "$BK"
+check "nas backup pair"           "/media/nas /media/nas_backup"       "$BK"
+check "media backup pair"         "/media/media /media/media_parity"   "$BK"
 check "safety dry-run first"      "rsync -an"                  "$BK"
 check "rsync delete mode"         "rsync -a --delete"          "$BK"
 check "mails when skipping"       "SKIPPED"                    "$BK"
@@ -203,25 +205,20 @@ cat > "$SB/bin/mountpoint" <<EOF
 #!/bin/sh
 exit \${FAKE_MOUNT_RC:-0}   # pretend everything is mounted (unless test says otherwise)
 EOF
-cat > "$SB/bin/snapraid" <<EOF
-#!/bin/sh
-case "\$*" in
-  *scrub*) echo "Errors: \${FAKE_SCRUB_ERRORS:-0}"; exit \${FAKE_SCRUB_RC:-0} ;;
-  *)       echo "fake snapraid ok" ;;
-esac
-EOF
 cat > "$SB/bin/sendmail" <<EOF
 #!/bin/sh
 cat >> "$T/mail.out"
 EOF
-chmod +x "$SB/bin/mountpoint" "$SB/bin/sendmail" "$SB/bin/snapraid"
+chmod +x "$SB/bin/mountpoint" "$SB/bin/sendmail"
 cp "$BK" "$SB/run-backup.sh"
-sed "s|^SRC=.*|SRC=$T/fsrc/|; s|^DEST=.*|DEST=$SB/dest/|; s|^LOG=.*|LOG=$SB/backup.log|" "$BK" > "$SB/run-backup.sh"
+sed "s|^/media/nas /media/nas_backup\$|$T/fsrc $SB/dest|; s|^/media/media /media/media_parity\$|$SB/fmedia $SB/fparity|; s|^LOG=.*|LOG=$SB/backup.log|" "$BK" > "$SB/run-backup.sh"
 
 # scenario A: dest has 100 old files, src has 20 -> 100% deletions -> must SKIP + mail
-mkdir -p "$T/fsrc"
+# (the second, media pair runs alongside with identical dirs -> clean)
+mkdir -p "$T/fsrc" "$SB/fmedia" "$SB/fparity"
 for i in $(seq 1 20);  do echo new > "$T/fsrc/file$i"; done
 for i in $(seq 1 100); do echo old > "$SB/dest/old$i"; done
+for i in $(seq 1 5);  do echo media > "$SB/fmedia/m$i"; cp "$SB/fmedia/m$i" "$SB/fparity/"; done
 if PATH="$SB/bin:$PATH" bash "$SB/run-backup.sh" > "$T/05a.out" 2>&1; then
   echo "  FAIL: should have skipped"; fail=$((fail+1))
 else
@@ -244,6 +241,11 @@ if diff -r "$T/fsrc" "$SB/dest" >/dev/null 2>&1; then
   echo "  PASS: dest mirrors src after backup"; pass=$((pass+1))
 else
   echo "  FAIL: dest does not mirror src"; fail=$((fail+1))
+fi
+if diff -r "$SB/fmedia" "$SB/fparity" >/dev/null 2>&1; then
+  echo "  PASS: media_parity mirrors media after backup"; pass=$((pass+1))
+else
+  echo "  FAIL: media_parity does not mirror media"; fail=$((fail+1))
 fi
 
 echo "=== 03b: actually RUN the smartd alert handler"
@@ -269,47 +271,6 @@ fi
 check "handler mailed unmount note" "UNMOUNTED /media/test"     "$T/mail.out"
 check "handler mailed the report"   "SMART alert for /dev/disk/by-uuid/fake" "$T/mail.out"
 check "handler called umount -R"    "umount -R /media/test"     "$SB/umount.log"
-
-echo "=== 06 snapraid"
-export NASRPI_MEDIA_DIR="$T/media" NASRPI_PARITY_DIR="$T/parity"
-mkdir -p "$T/media/photos" "$T/media/music" "$T/parity"
-runtest 06 'alerts@example.com\n\nn\n3\n5\n30\ny\n' ./06_setup_snapraid.sh   # blank line = default parity path
-SNAP="$R/usr/local/bin/nasrpi-snapraid.sh"
-check "snapraid conf: parity file"  "parity $T/parity/snapraid.parity" "$R/etc/snapraid.conf"
-check "snapraid conf: data dir"     "data $T/media"                    "$R/etc/snapraid.conf"
-check "snapraid conf: protects all" "add media $T/media"              "$R/etc/snapraid.conf"
-check "snapraid conf: content copies" "content "                       "$R/etc/snapraid.conf"
-check "snapraid cron installed"     "nasrpi-snapraid.sh"               "$R/etc/cron.d/nasrpi-snapraid"
-bash -n "$SNAP" \
-  && { echo "  PASS: snapraid cron script syntax"; pass=$((pass+1)); } \
-  || { echo "  FAIL: snapraid cron script syntax"; fail=$((fail+1)); }
-
-echo "=== 06b: actually RUN the generated snapraid cron script"
-sed "s|^LOG=.*|LOG=$SB/snapraid.log|; s|^CONF=.*|CONF=$R/etc/snapraid.conf|" "$SNAP" > "$SB/run-snapraid.sh"
-mail_before=$(wc -c < "$T/mail.out" 2>/dev/null || echo 0)
-# clean run: mounts ok (fake mountpoint), snapraid reports Errors: 0 -> no mail
-if PATH="$SB/bin:$PATH" bash "$SB/run-snapraid.sh" > "$T/06a.out" 2>&1; then
-  echo "  PASS: clean snapraid run exits 0"; pass=$((pass+1))
-else
-  echo "  FAIL: clean snapraid run failed"; cat "$T/06a.out"; fail=$((fail+1))
-fi
-mail_after=$(wc -c < "$T/mail.out" 2>/dev/null || echo 0)
-[ "$mail_before" = "$mail_after" ] \
-  && { echo "  PASS: no mail on clean run"; pass=$((pass+1)); } \
-  || { echo "  FAIL: unexpected mail on clean run"; fail=$((fail+1)); }
-# scrub errors -> report mail must be sent and exit non-zero
-if FAKE_SCRUB_ERRORS=5 PATH="$SB/bin:$PATH" bash "$SB/run-snapraid.sh" > "$T/06b.out" 2>&1; then
-  echo "  FAIL: scrub errors should exit non-zero"; fail=$((fail+1))
-else
-  echo "  PASS: scrub errors exit non-zero"; pass=$((pass+1))
-fi
-check "scrub error report mailed" "snapraid weekly" "$T/mail.out"
-# not mounted -> quiet skip, exit 0, no mail
-if FAKE_MOUNT_RC=1 PATH="$SB/bin:$PATH" bash "$SB/run-snapraid.sh" > "$T/06c.out" 2>&1; then
-  echo "  PASS: skips cleanly when not mounted"; pass=$((pass+1))
-else
-  echo "  FAIL: should skip with exit 0 when unmounted"; fail=$((fail+1))
-fi
 
 echo "=== cron files sanity"
 for f in "$R"/etc/cron.d/nasrpi-*; do

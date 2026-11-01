@@ -9,7 +9,6 @@ exactly where root is needed:
 ./03_setup_smartmontools.sh
 ./04_setup_rclone.sh
 ./05_setup_backup.sh
-./06_setup_snapraid.sh
 #+end_src
 
 Run any of them again any time: everything checks first, changes only what's
@@ -70,20 +69,14 @@ when =/media/nas= is unmounted.
 
 *** 05 — Backup
 
-Installs a weekly cron job running ~rsync -a --delete /media/nas/
-/media/nas_backup=~. Dry-runs first; if more than N% of destination files would
-be deleted, it aborts and *sends you a report*. Also mails on failure. Skips
-when either mount is missing.
+Installs a weekly cron job running ~rsync -a --delete~ for two pairs:
 
-*** 06 — snapraid
+- ~/media/nas/ → /media/nas_backup=~
+- ~/media/media/ → /media/media_parity=~
 
-- Sets up snapraid with content on =/media/media= and parity on
-  =/media/media_parity=. Generates =/etc/snapraid.conf= to protect *everything*
-  under =/media/media= with one recursive ~add media~. Runs a snapraid dry-run
-  and *guides you if the parity location is too small*; optionally builds initial
-  parity.
-- Then installs a weekly cron job that runs ~snapraid sync~ + ~snapraid scrub~,
-  skips when unmounted, and mails you if either operation reports an error.
+Per pair it dry-runs first; if more than N% of destination files would be
+deleted, it aborts that pair and *sends you a report*. Also mails on failure.
+Skips a pair when either of its mounts is missing.
 
 ** Tweaking
 
@@ -96,8 +89,8 @@ when either mount is missing.
   =/usr/local/bin/nasrpi-smartd-alert.sh= (set ~no~ for log/mail only); watched
   attributes are the =-I= list in =/etc/smartd.conf= (zero tolerance by default).
   Rerun 03 after adding or removing disks.
-- Snapraid layout: =/etc/snapraid.conf= (edit freely; rerunning 06 leaves it
-  alone once it exists).
+- Backup source/dest pairs: ~PAIRS~ at the top of
+  =/usr/local/bin/nasrpi-backup.sh~ (one ~source dest~ line per pair).
 
 ** Notes / gotchas
 
@@ -127,7 +120,7 @@ when either mount is missing.
 - Outgoing mail always goes through msmtp (=~/etc/msmtprc~, mode 600) via the
   ~sendmail~ compatibility shim from ~msmtp-mta~. Beware: a =~/.msmtprc~=
   would override the system config for that user.
-- 05's safety net compares proposed deletions against the destination file
+- 05's safety net compares proposed deletions against each destination's file
   count; the first run against an empty destination deletes nothing.
 
 ** Also interesting

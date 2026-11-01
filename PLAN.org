@@ -9,7 +9,6 @@
    03_setup_smartmontools.sh
    04_setup_rclone.sh
    05_setup_backup.sh
-   06_setup_snapraid.sh
  #+end_src
 
 01
@@ -47,16 +46,8 @@
      should run; should just skip if the target is not mounted
 05
    - setup a weekly cron job that runs rsync backup from =/media/nas= to
-     =/media/nas_backup=, ask me what time of day and what weekday it should run;
-     should just skip if the target is not mounted; should skip if more than N%
-     files would be deleted; it should =sendmail= a report if it failed in that
-     case
-06
-   - ensure snapraid is set up such that =/media/media= is used for content and
-     =/media/parity= for parity. if not, install it and set it up; guiding me if
-     accidentally the parity location is too small
-   - set up a weekly cron job that does the snapraid sync and snapraid scrub
-     tasks, ask me what time of day and what weekday it should run; should just
-     skip if the target is not mounted. use =sendmail= to report in case of
-     errors
+     =/media/nas_backup= and from =/media/media= to =/media/media_parity=, ask
+     me what time of day and what weekday it should run; should just skip if the
+     target is not mounted; should skip if more than N% files would be deleted;
+     it should =sendmail= a report if it failed in that case
   
