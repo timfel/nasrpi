@@ -20,32 +20,35 @@ ask NOTIFY_EMAIL "Address to receive SMART alerts" "root"
 # --- which disks to monitor -----------------------------------------------------
 # smartd entries use stable /dev/disk/by-uuid/<uuid> paths where a filesystem
 # UUID exists (survives reconnects/port changes); falls back to /dev/sdX.
-DISKS=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}')
 MON=()
-for d in $DISKS; do
-  u=$(lsblk -rno UUID "$d" 2>/dev/null | grep -m1 . || true)
-  if [ -n "$u" ]; then
-    MON+=("/dev/disk/by-uuid/$u")
-    echo "  $d -> /dev/disk/by-uuid/$u"
-  else
-    warn "no filesystem UUID on $d -- monitoring by name (may change on reconnect)"
-    MON+=("$d")
-  fi
+declare -A seen        # avoid double-monitoring the same disk via id aliases
+for link in /dev/disk/by-id/ata*; do
+  [ -L "$link" ] || continue
+  tgt=$(readlink -f "$link")
+  # keep only whole /dev/sdX disks (no partitions, no mmcblk/nvme/loop/dm)
+  case ${tgt#/dev/} in
+    sd[a-z]*) ;;                                  # looks like sdX...
+    *) continue ;;
+  esac
+  [[ $tgt =~ ^/dev/sd[a-z]+$ ]] || continue       # ...and not sdX1/part-style
+  [[ -n ${seen[$tgt]:-} ]] && continue            # already have an id for this disk
+  seen[$tgt]=1
+  MON+=("$link")
+  echo "  $tgt -> $link"
 done
-
-ALERT_OPTS="-M exec $ALERT_BIN \$DEVICE"
+[ ${#MON[@]} -eq 0 ] && warn "no /dev/disk/by-id entries pointing to /dev/sdX disks"
 
 build_smartd() {
   echo "# Managed by nasrpi setup scripts -- rerun 03 after adding/removing disks."
-  echo "# -a : all SMART checks, -m : mail via sendmail, -s : short/long self-tests,"
-  echo "# -o on : auto-offline data collection, -d maint : only run self-tests during"
-  echo "# maintenance windows, so idle/spun-down disks are NOT spun up for testing."
+  echo "# -n standby,q : no check when in standby"
+  echo "# -a : all SMART checks (health, Usage & Prefail changes, error and selftest logs),"
+  echo "# -m : mail on any failures"
   echo "# -I <id> : mail immediately whenever these raw attributes change --"
   echo "# zero tolerance: 5 reallocated, 187 uncorrected, 197 pending, 198 uncorrectable."
   echo "# -M exec : run the nasrpi alert handler (device as arg, report on stdin)."
   local d
   for d in "${MON[@]}"; do
-    echo "$d -n standby,q -a -m $NOTIFY_EMAIL -o on -s (S/../.././09|L/../../6/10) -d maint -I 5 -I 187 -I 197 -I 198 $ALERT_OPTS"
+    echo "$d -n standby,q -a -m $NOTIFY_EMAIL -I 5 -I 187 -I 197 -I 198 -M exec $ALERT_BIN"
   done
 }
 
@@ -53,9 +56,9 @@ build_smartd() {
 existing=""
 if [ -f "$SMARTCTL_CFG" ]; then
   existing=$(grep -v '^# Managed by nasrpi' "$SMARTCTL_CFG" \
-             | grep -v ' -d maint' || true)
+             | grep -v ' -M exec $ALERT_BIN' || true)
 fi
-{ [ -n "$existing" ] && echo "$existing"; build_smartd; } | write_file 644 "$SMARTCTL_CFG" "sudo" || true
+{ [ -n "$existing" ] && echo "$existing"; build_smartd; } | write_file 644 "$SMARTCTL_CFG" "sudo" "force" || true
 
 if [ "${DRY_RUN:-0}" != "1" ]; then
   if confirm "Restart the smartmontools service now?"; then
