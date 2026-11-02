@@ -22,7 +22,8 @@ ask NOTIFY_EMAIL "Address to receive SMART alerts" "root"
 # UUID exists (survives reconnects/port changes); falls back to /dev/sdX.
 MON=()
 declare -A seen        # avoid double-monitoring the same disk via id aliases
-for link in /dev/disk/by-id/ata*; do
+BY_ID_DIR="${NASRPI_BY_ID_DIR:-/dev/disk/by-id}"   # test hook: fake by-id tree
+for link in "$BY_ID_DIR"/ata*; do
   [ -L "$link" ] || continue
   tgt=$(readlink -f "$link")
   # keep only whole /dev/sdX disks (no partitions, no mmcblk/nvme/loop/dm)

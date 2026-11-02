@@ -36,6 +36,21 @@ EOF
 chmod +x "$T/bin/lsblk" "$T/bin/blkid"
 export PATH="$T/bin:$PATH"
 
+# --- fake udev by-id tree (deterministic disks + id aliases for 03) ------------
+# 03 scans <by-id>/ata* symlinks; point it at a sandbox tree of our own.
+# Partitions, mmcblk/nvme targets and non-ata links must all be ignored,
+# and the second alias of WDC40 must NOT create a second smartd entry.
+export NASRPI_BY_ID_DIR="$T/by-id"
+mkdir -p "$NASRPI_BY_ID_DIR"
+ln -s /dev/sda  "$NASRPI_BY_ID_DIR/ata-WDC_WD40"
+ln -s /dev/sda  "$NASRPI_BY_ID_DIR/ata-WDC_WD40_alias"   # duplicate id -> ignored
+ln -s /dev/sdb  "$NASRPI_BY_ID_DIR/ata-Seagate_Seagate"
+ln -s /dev/sdc  "$NASRPI_BY_ID_DIR/ata-Samsung_Samsung"
+ln -s /dev/sdd  "$NASRPI_BY_ID_DIR/ata-Toshiba_Toshiba"
+ln -s /dev/sda1 "$NASRPI_BY_ID_DIR/ata-WDC_WD40-part1"     # partition -> ignored
+ln -s /dev/mmcblk0 "$NASRPI_BY_ID_DIR/ata-SD_Card"              # not sdX -> ignored
+ln -s /dev/sdb1 "$NASRPI_BY_ID_DIR/usb-Seagate_usb"         # non-ata -> ignored
+
 pass=0; fail=0
 checknot() {  # checknot NAME REGEXP FILE -- pass when pattern is ABSENT
   if grep -qE -- "$2" "$3" 2>/dev/null; then
@@ -184,18 +199,35 @@ check "mbsyncrc reported up to date"  "already up to date" "$T/02b.out"
 
 echo "=== 03 smartmontools"
 runtest 03 'alerts@example.com\ny\n' ./03_setup_smartmontools.sh
-check "smartd monitors sda"       "/dev/disk/by-uuid/11111111-0000-0000-0000-0000000000sda -n standby,q -a -m alerts@example.com" "$R/etc/smartd.conf"
-check "smartd covers all disks"    "/dev/disk/by-uuid/11111111-0000-0000-0000-0000000000sdd" "$R/etc/smartd.conf"
-check "no spin-up for self-tests"  "-d maint"                          "$R/etc/smartd.conf"
+check "smartd monitors sda"       "$NASRPI_BY_ID_DIR/ata-WDC_WD40 -n standby,q -a -m alerts@example.com" "$R/etc/smartd.conf"
+check "smartd covers all disks"    "$NASRPI_BY_ID_DIR/ata-Toshiba_Toshiba -n standby,q" "$R/etc/smartd.conf"
+check "smartd leaves standby alone" "-n standby,q"                      "$R/etc/smartd.conf"
 check "smartd watches attrs"       "-I 5 -I 187 -I 197 -I 198"         "$R/etc/smartd.conf"
 check "smartd EXEC handler"        "-M exec /usr/local/bin/nasrpi-smartd-alert.sh" "$R/etc/smartd.conf"
-check "smartd passes device to handler" '$DEVICE'                       "$R/etc/smartd.conf"
+checknot "no selftest schedule"     "-s "                               "$R/etc/smartd.conf"
+check "handler takes device arg"   'DEV="${1:-$SMARTD_DEVICE}"'          "$R/usr/local/bin/nasrpi-smartd-alert.sh"
+# one entry per disk: no partitions, no mmcblk/nvme, no duplicate id aliases
+checknot "no partitions monitored"  "part1"                             "$R/etc/smartd.conf"
+checknot "no mmcblk disks"         "mmcblk"                            "$R/etc/smartd.conf"
+checknot "no nvme disks"           "nvme"                              "$R/etc/smartd.conf"
+checknot "duplicate id alias dropped" "ata-WDC_WD40_alias"               "$R/etc/smartd.conf"
+[ "$(grep -c 'ata-WDC_WD40 ' "$R/etc/smartd.conf")" -eq 1 ] \
+  && { echo "  PASS: one smartd entry per disk"; pass=$((pass+1)); } \
+  || { echo "  FAIL: duplicate disk entries in smartd.conf"; fail=$((fail+1)); }
 check "handler auto-unmount on"   "AUTO_UNMOUNT=yes"                   "$R/usr/local/bin/nasrpi-smartd-alert.sh"
 check "handler unmounts failures" "umount -R"                          "$R/usr/local/bin/nasrpi-smartd-alert.sh"
 check "handler logs alerts"       "nasrpi-smart-alert.log"             "$R/usr/local/bin/nasrpi-smartd-alert.sh"
 sh -n "$R/usr/local/bin/nasrpi-smartd-alert.sh" \
   && { echo "  PASS: alert handler syntax"; pass=$((pass+1)); } \
   || { echo "  FAIL: alert handler syntax"; fail=$((fail+1)); }
+
+echo "=== 03 rerun: idempotent (force-replace must not eat answers)"
+sdsum_before=$(md5sum "$R/etc/smartd.conf")
+runtest 03r 'alerts@example.com\ny\n' ./03_setup_smartmontools.sh
+[ "$sdsum_before" = "$(md5sum "$R/etc/smartd.conf")" ] \
+  && { echo "  PASS: smartd.conf stable on rerun"; pass=$((pass+1)); } \
+  || { echo "  FAIL: smartd.conf changed on rerun"; fail=$((fail+1)); }
+check "smartd.conf reported up to date" "already up to date" "$T/03r.out"
 
 echo "=== 04 rclone"
 runtest 04 'y\n\n2\n4\n0\ny\n' ./04_setup_rclone.sh
@@ -287,13 +319,13 @@ EOF
 chmod +x "$SB/bin/lsblk" "$SB/bin/umount"
 sed "s|^LOG=.*|LOG=$SB/alert.log|" "$R/usr/local/bin/nasrpi-smartd-alert.sh" > "$SB/run-alert.sh"
 if echo "simulated smartd alert mail body" \
-   | PATH="$SB/bin:$PATH" sh "$SB/run-alert.sh" /dev/disk/by-uuid/fake > "$T/03b.out" 2>&1; then
+   | PATH="$SB/bin:$PATH" sh "$SB/run-alert.sh" /dev/disk/by-id/ata-WDC_WD40 > "$T/03b.out" 2>&1; then
   echo "  PASS: alert handler exits 0"; pass=$((pass+1))
 else
   echo "  FAIL: alert handler failed"; cat "$T/03b.out"; fail=$((fail+1))
 fi
 check "handler mailed unmount note" "UNMOUNTED /media/test"     "$T/mail.out"
-check "handler mailed the report"   "SMART alert for /dev/disk/by-uuid/fake" "$T/mail.out"
+check "handler mailed the report"   "SMART alert for /dev/disk/by-id/ata-WDC_WD40" "$T/mail.out"
 check "handler called umount -R"    "umount -R /media/test"     "$SB/umount.log"
 
 echo "=== cron files sanity"

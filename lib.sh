@@ -6,6 +6,7 @@
 #   NASRPI_FSTAB=path    ... override /etc/fstab location
 #   NASRPI_CRON_DIR=path ... override /etc/cron.d location
 #   NASRPI_ETC_DIR=path  ... override /etc location for generated configs
+#   NASRPI_BY_ID_DIR=path ... override /dev/disk/by-id when picking disks (03)
 
 NASRPI_MOUNTS=(/media/media /media/media_backup /media/nas /media/nas_backup)
 NASRPI_CRON_DIR="${NASRPI_CRON_DIR:-/etc/cron.d}"
