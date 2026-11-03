@@ -991,7 +991,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   warn "DRY_RUN: would send a test mail through sendmail -> $MSMTPRC"
 else
   test_to=""
-  ask test_to "Send a test mail from $SMTP_DEFAULT to (empty = skip)" ""
+  ask test_to "Send a test mail from $SMTP_DEFAULT to what email address? (empty = skip)" ""
   if [ -n "$test_to" ]; then
     if printf 'Subject: nasrpi test mail\n\nSent by 02_setup_pizauth_mbsync_sendmail.sh via pizauth + msmtp.\n' \
         | $NASRPI_SUDO sendmail -f "$SMTP_DEFAULT" "$test_to"; then
