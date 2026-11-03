@@ -1,11 +1,13 @@
 * nasrpi setup scripts
 
-Run them in order, as your normal user, on the Pi; they escalate with ~sudo~
-exactly where root is needed:
+Run them in order, on the Pi; they escalate with ~sudo~ exactly where root is
+needed (02 installs a Rust toolchain and builds =pizauth= as *you*, and asks for
+your sudo password on a line of its own so a password prompt can't get eaten by a
+pipe):
 
 #+begin_src sh
 ./01_establish_mount_points.sh
-./02_setup_emailproxy_mbsync_sendmail.sh
+./02_setup_pizauth_mbsync_sendmail.sh
 ./03_setup_smartmontools.sh
 ./04_setup_rclone.sh
 ./05_setup_backup.sh
@@ -23,29 +25,39 @@ Puts your four disks into =/etc/fstab= (by UUID) at =/media/media=,
 =/media/media_backup=, =/media/nas= and =/media/nas_backup=. Guides you through
 picking disks by name/size, previews the fstab edit, and backs up fstab first.
 
-*** 02 — emailproxy, mbsync, sendmail
+*** 02 — pizauth, mbsync, sendmail
 
-- Installs ~uv~ + ~emailproxy~ under =/opt/emailproxy=, and creates a systemd
-  service named ~emailproxy~ that runs ~=--no-gui~ at boot, pointed at
-  =/opt/emailproxy/accounts.ini= via ~=--config-file~.
-- Seeds that file in *emailproxy's own config format* (same format as the
-  upstream =emailproxy.config= sample: accounts are =[you@example.com]= sections,
-  local listeners come from =[IMAP-1993]= / =[SMTP-1587]= style sections) and
-  opens it for you to add your Gmail / Outlook / ... accounts. Everything below
-  is read from that file: account list, local ports, TLS mode
-  (=02_emailproxy.py= does the ini parsing).
-- Runs emailproxy's ~=--external-auth=~ OAuth flow whenever the account set
-  changes: the service is stopped and emailproxy runs in the foreground (that
-  mode needs a real terminal) and prompts for the OAuth URL and the pasted
-  post-authentication URL itself, while 02 triggers one IMAP login per account —
-  login accepted means the token is in place.
-- Generates =/etc/mbsyncrc= to pull *down only* into
-  =/media/nas/Mail/<MAILBOX>= (one folder per account, you name them), and
-  installs a weekly mbsync cron job that skips when =/media/nas= is unmounted.
-- Sets up *msmtp* (plus ~msmtp-mta~, which provides =/usr/sbin/sendmail=) so
-  every script, smartd and cron job sends mail through =/etc/msmtprc= →
-  emailproxy's local SMTP port (from its =[SMTP-<port>]= section, e.g.
-  ~localhost:1587~) using the upstream mailer you pick.
+=pizauth= (<https://github.com/ltratt/pizauth>) is a small Rust daemon that owns
+the OAuth2 tokens for your mail accounts and hands out access tokens on request.
+mbsync and msmtp ask it for a token instead of ever knowing a password.
+
+- Builds =pizauth= (pinned tag, =lto= build) into =/opt/pizauth= and installs a
+  =/usr/local/bin/pizauth= wrapper that pins the socket to =/run/pizauth=, so the
+  daemon, root's cron jobs and interactive shells all talk to the same instance.
+  One systemd service, =pizauth=, started at boot.
+- Adds your accounts to =/etc/pizauth.conf= (Gmail and Outlook presets built in,
+  anything else prompted for). Existing =account= blocks are kept verbatim when
+  you rerun; =awk~ reads them, no Python involved.
+- OAuth sign-in opens a URL in *your laptop's* browser: 02 prints the link and
+  waits while =pizauth= catches the redirect through an SSH tunnel you open from
+  the laptop (=ssh -N -L 127.0.0.1:19024:127.0.0.1:19024 tim@think=). Nothing has
+  to be pasted back, and no code or token is ever typed by hand.
+- Keeps the tokens across reboots, *sealed to your LAN*: pizauth dumps its token
+  state on every change and restores it when the server starts, but a pizauth dump
+  is not encrypted (only obfuscated), so we always seal it with gpg. The key is
+  derived from your router's UPnP device id (=uuid:...=, readable without a
+  password only from inside your LAN) and is never stored on the Pi. A Pi booting
+  somewhere else cannot derive it and stays unsigned; nothing unencrypted ever
+  reaches the disk. =/etc/default/nasrpi-pizauth= holds the settings.
+- Writes =/etc/mbsyncrc= (XOAUTH2 straight to the provider, =Sync Pull= only) and
+  =/etc/msmtprc= (=auth xoauth2= with =passwordeval pizauth show <account>=),
+  installs =/usr/sbin/sendmail= via ~msmtp-mta~, and a weekly mbsync cron job.
+  Missing a sync is fine: if =/media/nas= is not mounted or =pizauth= is not
+  answering, the run logs one line, exits 0 and next week's run catches up.
+- Per-account choices (maildir folder, folder patterns, provider hosts) live in
+  =/etc/nasrpi-mailmaps=. Gmail defaults to pulling only
+  ="[Google Mail]/All Mail"=, which already contains inbox and sent mail; Outlook
+  and everything else pull =*=.
 
 *** 03 — smartmontools
 
@@ -81,8 +93,16 @@ Skips a pair when either of its mounts is missing.
 ** Tweaking
 
 - Cron schedules: rerun the script, or edit =/etc/cron.d/nasrpi-*= directly.
-- Folder names for mail / remotes: =/opt/emailproxy/.nasrpi-mailmaps=,
-  =/etc/nasrpi-rclone-maps= — plain ~name=folder~ files, edit freely.
+- Mail: =/etc/nasrpi-mailmaps= (=account=folder=, plus =provider=, =imap_host=,
+  ~patterns~ per account) — edit it and rerun 02 to regenerate =/etc/mbsyncrc=
+  and =/etc/msmtprc=.
+- Token dump: =/etc/default/nasrpi-pizauth= (=DUMP_FILE=, =GATEWAY=, =UPNP_PORT=,
+  callback port, ssh target). Rerun 02, or call the pieces directly:
+  =/usr/local/bin/nasrpi-pizauth-key key= (what the derived key would be),
+  =nasrpi-pizauth-dump= (seal a fresh dump), =nasrpi-pizauth-restore= (unseal and
+  feed it back to pizauth).
+- pizauth itself: =/etc/pizauth.conf= (accounts, callback port, notify/startup/dump
+  commands), =sudo /usr/local/bin/pizauth status|show <account>|refresh=.
 - Backup knobs (~NOTIFY_EMAIL~, ~DELETE_PCT~): top of
   =/usr/local/bin/nasrpi-backup.sh=.
 - SMART alert behaviour: ~AUTO_UNMOUNT~ at the top of
@@ -95,33 +115,38 @@ Skips a pair when either of its mounts is missing.
 ** Notes / gotchas
 
 - Needs Debian/Raspbian (~apt~) on the Pi; scripts exit cleanly elsewhere.
-- Config source of truth: =/opt/emailproxy/accounts.ini= (emailproxy's own ini
-  format). Add an account section per address with =permission_url=,
-  =token_url=, =oauth2_scope=, =client_id= (Outlook and Gmail examples are
-  commented in the seeded file). Unconfigured sample sections that ship with
-  emailproxy (=*** your client id here ***=) are detected and ignored. Rerun 02
-  after edits to regenerate =/etc/mbsyncrc=, =/etc/msmtprc= and the cron jobs.
-- The password 02 asks for is the *local* proxy login password: mbsync/msmtp use
-  it to talk to emailproxy and emailproxy uses it to encrypt its cached OAuth
-  tokens; the real provider authentication is OAuth in the browser. It is stored
-  in =/etc/mbsyncrc= (=Pass ..., mode 600) and =/etc/msmtprc= so unattended sync
-  and =sendmail= work.
-- The proxy is only ever used over plain text on localhost (IMAP + SMTP, no
-  local TLS, no POP): =mbsync= gets ~SSLType None~, msmtp gets ~tls off~; the
-  proxy does all upstream TLS itself.
-- OAuth: 02 offers the sign-in flow on every run — stop the service, run
-  ~emailproxy --no-gui --external-auth~ in a second shell, and 02 triggers an
-  IMAP login per account until it is accepted. Say no to the prompt when you
-  know the tokens are fine. Catch-all accounts (=[@domain.com]=) are not
-  enumerable; use one section per address.
-- The local proxy password is **mandatory**: emailproxy aborts any login without
-  one (=Login failed - no password provided for account ...=), so there is no
-  ~auth off~ mode — msmtp is always written with ~auth on~.
+- Config source of truth for mail accounts: =/etc/pizauth.conf= in pizauth's own
+  format, one =account "name" { ... }= block each with =client_id=,
+  =client_secret=, =auth_uri=, =token_uri=, =scopes= and a =login_hint=. Add a
+  block (or rerun 02 to be walked through it), then sign in:
+  =sudo /usr/local/bin/pizauth show <account>= prints the URL if no token exists.
+  =/etc/nasrpi-mailmaps= decides where each account's mail lands.
+- =/usr/local/bin/pizauth= is a wrapper that sets =XDG_RUNTIME_DIR=/run/pizauth=
+  and then runs =/opt/pizauth/bin/pizauth=. Use it everywhere (=sudo pizauth
+  status= works) — the real binary without that environment looks for the socket
+  somewhere else and reports "Not running".
+- Tokens live in =/var/lib/pizauth= and must stay off =/media/nas=: that disk is
+  world-readable-ish and gets rsynced and pushed to the cloud by 04/05.
+- The sealed dump protects against a stolen SD card, not against someone standing
+  in your LAN (they can read the router's device id too, or steal the router as
+  well). That trade-off is what makes an unattended restore possible at all. If
+  the key cannot be derived the dump simply stays sealed: pizauth comes back up
+  without tokens and asks you to sign in.
+- Replace the router, or turn its UPnP off, and the old dump can no longer be
+  opened: rerun 02 to sign in once and reseal. A router that keeps the same
+  =uuid:...= keeps the dump readable.
+- Mail sync is pull-only on purpose (=Sync Pull=): this box is an archive, not a
+  second IMAP server, so nothing can rename or delete anything upstream.
 - Outgoing mail always goes through msmtp (=~/etc/msmtprc~, mode 600) via the
-  ~sendmail~ compatibility shim from ~msmtp-mta~. Beware: a =~/.msmtprc~=
-  would override the system config for that user.
+  ~sendmail~ shim from ~msmtp-mta~. Beware: a =~/.msmtprc~ would override the
+  system config for that user.
+- =libsasl2-modules-kdexoauth2= provides the XOAUTH2 mechanism mbsync needs.
 - 05's safety net compares proposed deletions against each destination's file
   count; the first run against an empty destination deletes nothing.
+- Migrating from the old Python =emailproxy= setup? Run
+  =sudo ./cleanup_emailproxy.sh= once: it stops and disables that service, removes
+  =/opt/emailproxy= (asking before deleting the OAuth state) and the superseded
+  cron entry. Then rerun 02.
 
 ** Also interesting
 
@@ -143,7 +168,11 @@ UUID=78247AAC247A6D4E                     /media/mybook16t  ntfs-3g  defaults,us
 ** Testing without the Pi
 
 #+begin_src bash
-./test_dryrun.sh          # runs every script with DRY_RUN=1 and fake paths
+./test_dryrun.sh          # every script with DRY_RUN=1 against fake paths
+./test_pizauth_seal.sh    # the LAN-sealed token dump, for real, unprivileged
 #+end_src
 
-Nothing is written outside =/tmp= in dry-run mode; root actions are printed.
+Nothing is written outside =/tmp= (or =.tmp/=) in dry-run mode; root is never
+involved. The seal test runs the real helpers and gpg: it fakes a router by
+feeding the UDN through =/etc/default/nasrpi-pizauth=, and a fake =pizauth=
+binary for =dump=/=restore=.

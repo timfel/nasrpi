@@ -91,111 +91,143 @@ check "reports already set up" "already set up" "$T/01b.out"
   && { echo "  PASS: fstab untouched on rerun"; pass=$((pass+1)); } \
   || { echo "  FAIL: fstab changed on rerun"; fail=$((fail+1)); }
 
-echo "=== 02 emailproxy/mbsync/sendmail"
-# A realistic emailproxy config in the real emailproxy.config format:
-# [IMAP-n]/[SMTP-n] listeners, accounts as [addr] sections, plus the shipped
-# sample placeholders (which must be ignored).
-mkdir -p "$R/opt/emailproxy"
-cat > "$R/opt/emailproxy/accounts.ini" <<'CFG'
-[Email OAuth 2.0 Proxy configuration file]
-documentation = This is a sample Email OAuth 2.0 Proxy configuration file.
-	format = documented inline
+echo "=== 02 pizauth/mbsync/sendmail"
+# Two accounts in pizauth's own config format. 02 keeps existing account blocks
+# verbatim, so this fixture is what a previous run would have left behind.
+mkdir -p "$R/etc"
+cat > "$R/etc/pizauth.conf" <<'CONF'
+# Managed by nasrpi setup scripts (02). Accounts: one 'account' block each.
+# The text inside an existing account block is kept as-is when 02 reruns;
+# global settings below come from /etc/default/nasrpi-pizauth.
 
-[Server setup]
-documentation = Local servers are specified as [IMAP-1993] etc.
+# OAuth callback: only on loopback. Reach it from your laptop with
+#   ssh -N -L 127.0.0.1:19024:127.0.0.1:19024 tim@thinkpad
+http_listen = "localhost:19024";
+startup_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-restore";
+token_event_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-dump";
+auth_notify_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-notify auth";
+error_notify_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-notify error";
 
-[IMAP-1993]
-documentation = *** note: this server works for Office 365 and personal Outlook ***
-server_address = imap.gmail.com
-server_port = 993
-local_address = 127.0.0.1
+account "timfelgentreff_gmail_com" {
+    client_id = "gmail-client-id";
+    client_secret = "gmail-secret";
+    auth_uri = "https://accounts.google.com/o/oauth2/auth";
+    token_uri = "https://oauth2.googleapis.com/token";
+    scopes = ["https://mail.google.com/"];
+    auth_uri_fields = { "login_hint": "timfelgentreff@gmail.com" };
+}
 
-[SMTP-1587]
-server_address = smtp-mail.outlook.com
-server_port = 587
-server_starttls = True
-local_address = 127.0.0.1
-
-[Account setup]
-documentation = Accounts are specified using your email address as the section heading.
-
-[tim.felgentreff@oracle.com]
-permission_url = https://login.microsoftonline.com/common/oauth2/v2.0/authorize
-token_url = https://login.microsoftonline.com/common/oauth2/v2.0/token
-oauth2_scope = https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access
-redirect_uri = http://localhost
-client_id = 9e5f94bc-e8a4-4e73-b8be-63364c29d753
-
-[timfelgentreff@gmail.com]
-permission_url = https://accounts.google.com/o/oauth2/auth
-token_url = https://oauth2.googleapis.com/token
-oauth2_scope = https://mail.google.com/
-redirect_uri = http://localhost
-client_id = 406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com
-
-[your.email@fastmail.com]
-permission_url = https://api.fastmail.com/oauth/authorize
-token_url = https://api.fastmail.com/oauth/refresh
-oauth2_scope = https://www.fastmail.com/dev/protocol-imap
-client_id = *** your client id here ***
-
-[emailproxy]
-allow_catch_all_accounts = False
-CFG
-# answers: service y, proxy password (oauth flow: dry-run prints, real run asks),
-#          folder defaults (2 accounts), dow=0 hour=3 min=15, cron-install y
-runtest02_input='y\nlocalproxy_pw\n\n\n0\n3\n15\ny\n'
-runtest 02 "$runtest02_input" ./02_setup_emailproxy_mbsync_sendmail.sh
-check "systemd unit: our config file" "ExecStart=/opt/emailproxy/bin/emailproxy --no-gui --config-file /opt/emailproxy/accounts.ini" "$R/etc/systemd/system/emailproxy.service"
-check "accounts found from ini"    "tim.felgentreff@oracle.com" "$T/02.out"
-check "second account found"       "timfelgentreff@gmail.com"   "$T/02.out"
-check "sample entries reported"    "sample placeholder"          "$T/02.out"
-check "mbsyncrc: oracle account"   "IMAPAccount tim_felgentreff_oracle_com" "$R/etc/mbsyncrc"
-check "mbsyncrc: gmail account"    "IMAPAccount timfelgentreff_gmail_com"   "$R/etc/mbsyncrc"
-check "mbsyncrc: real user name"   "User tim.felgentreff@oracle.com"         "$R/etc/mbsyncrc"
-check "mbsyncrc: proxy imap port"  "Port 1993"                          "$R/etc/mbsyncrc"
-check "mbsyncrc: plain to proxy"   "SSLType None"                       "$R/etc/mbsyncrc"
-checknot "mbsyncrc: no new-only TLSType" "^TLSType"                      "$R/etc/mbsyncrc"
-check "mbsyncrc: colon store spec" "Far :tim_felgentreff_oracle_com-remote:" "$R/etc/mbsyncrc"
-check "mbsyncrc: near store spec"  "Near :tim_felgentreff_oracle_com-local:" "$R/etc/mbsyncrc"
-check "mbsyncrc: subfolders"       "SubFolders Verbatim"                   "$R/etc/mbsyncrc"
-checknot "mbsyncrc: no bogus Type"    "^Type Maildir"                    "$R/etc/mbsyncrc"
-checknot "mbsyncrc: no Format kw"     "^Format "                           "$R/etc/mbsyncrc"
-checknot "mbsyncrc: no bare New kw"   "^New "                            "$R/etc/mbsyncrc"
-checknot "mbsyncrc: no Master/Slave" "^Master "                           "$R/etc/mbsyncrc"
-check "mbsyncrc: proxy password"   "Pass localproxy_pw"                "$R/etc/mbsyncrc"
-check "mbsyncrc: LOGIN auth"       "AuthMechs LOGIN"                    "$R/etc/mbsyncrc"
-check "mbsyncrc: down only"        "Sync Pull"                          "$R/etc/mbsyncrc"
-check "mbsyncrc: mail folder"      "/media/nas/Mail/oracle/"             "$R/etc/mbsyncrc"
-check "mail cron installed"        "nasrpi-mail-sync.sh"                "$R/etc/cron.d/nasrpi-mail"
-check "mail cron schedule"         "15 3 * * 0 root"                    "$R/etc/cron.d/nasrpi-mail"
-check "mail sync skips unmounted"  "mountpoint -q /media/nas"            "$R/usr/local/bin/nasrpi-mail-sync.sh"
-check "msmtprc: emailproxy account" "account emailproxy"                 "$R/etc/msmtprc"
-check "msmtprc: proxy smtp port"   "port 1587"                           "$R/etc/msmtprc"
-check "msmtprc: plain to proxy"    "tls off"                             "$R/etc/msmtprc"
-check "msmtprc: from account"      "from tim.felgentreff@oracle.com"     "$R/etc/msmtprc"
-check "msmtprc: proxy password"    "password localproxy_pw"              "$R/etc/msmtprc"
-check "msmtprc: default account"   "account default : emailproxy"        "$R/etc/msmtprc"
-check "oauth flow described"       "IMAP login per account"            "$T/02.out"
-# real-parser smoke test (when isync is installed): no config parse errors
+account "someone_outlook_com" {
+    client_id = "outlook-client-id";
+    client_secret = "outlook-secret";
+    auth_uri = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+    token_uri = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+    scopes = ["https://outlook.office.com/IMAP.AccessAsUser.All", "https://outlook.office.com/SMTP.Send", "offline_access"];
+    auth_uri_fields = { "login_hint": "someone@outlook.com" };
+}
+CONF
+# blank gateway/ports (defaults), no new account, default mail settings for
+# both accounts, cron Sunday 03:15, install it, sendmail uses account 1
+runtest02_input='\n\n\n\nn\n\n\n\n\n0\n3\n15\ny\n1\n'
+runtest 02 "$runtest02_input" ./02_setup_pizauth_mbsync_sendmail.sh
+PZ="$R/etc/pizauth.conf"
+PZDEF="$R/etc/default/nasrpi-pizauth"
+check "both accounts seen"          "someone_outlook_com -> someone@outlook.com" "$T/02.out"
+check "helpers: socket is pinned"  "XDG_RUNTIME_DIR" "$R/usr/local/bin/pizauth"
+check "helpers: socket pinned to /run/pizauth" "XDG_RUNTIME_DIR:-/run/pizauth" "$R/usr/local/bin/pizauth"
+check "key helper: derived from UDN"  "nasrpi-pizauth-v1|" "$R/usr/local/bin/nasrpi-pizauth-key"
+check "dump helper seals"             "nasrpi-pizauth-key\" seal" "$R/usr/local/bin/nasrpi-pizauth-dump"
+check "restore needs the LAN key"      "cannot open" "$R/usr/local/bin/nasrpi-pizauth-restore"
+check "restore retries the socket"    "sleep 2" "$R/usr/local/bin/nasrpi-pizauth-restore"
+check "defaults: gateway for the key" "GATEWAY=192.168.178.1"  "$PZDEF"
+checknot "no dyndns in defaults"  "DYNDNS"                     "$PZDEF"
+checknot "dump mode is not a choice" "DUMP_MODE"               "$PZDEF"
+check "dump outside /media/nas"  "DUMP_FILE=/var/lib/pizauth/tokens.dump.gpg" "$PZDEF"
+checknot "no UDN stored on disk"     "^UDN=."                 "$PZDEF"
+checknot "no key material in defaults" "^[A-Z_]*KEY="         "$PZDEF"
+check "conf: loopback callback"  "http_listen = \"localhost:19024\";" "$R/etc/pizauth.conf"
+check "conf: restore at boot"    'startup_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-restore";' "$R/etc/pizauth.conf"
+check "conf: dump on token events" 'token_event_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-dump";' "$R/etc/pizauth.conf"
+check "conf: gmail block kept"   "client_id = \"gmail-client-id\";" "$R/etc/pizauth.conf"
+check "conf: outlook block kept" "client_id = \"outlook-client-id\";" "$R/etc/pizauth.conf"
+check "unit: runs the server"    "ExecStart=/opt/pizauth/bin/pizauth server -c /etc/pizauth.conf -d" "$R/etc/systemd/system/pizauth.service"
+check "unit: socket dir"         "RuntimeDirectory=pizauth"  "$R/etc/systemd/system/pizauth.service"
+check "unit: env for root cron"  "Environment=XDG_RUNTIME_DIR=/run/pizauth" "$R/etc/systemd/system/pizauth.service"
+check "unit: reload reloads conf" "ExecReload=/usr/local/bin/pizauth reload" "$R/etc/systemd/system/pizauth.service"
+M="$R/etc/mbsyncrc"
+check "mbsync: gmail account block"  "IMAPAccount timfelgentreff_gmail_com" "$R/etc/mbsyncrc"
+check "mbsync: outlook account"     "IMAPAccount someone_outlook_com"   "$R/etc/mbsyncrc"
+check "mbsync: gmail host"        "Host imap.gmail.com"            "$R/etc/mbsyncrc"
+check "mbsync: outlook host"      "Host outlook.office365.com"      "$R/etc/mbsyncrc"
+check "mbsync: xoauth2 to provider" "AuthMechs XOAUTH2"              "$R/etc/mbsyncrc"
+check "mbsync: token from pizauth" "PassCmd \"/usr/local/bin/pizauth show timfelgentreff_gmail_com\"" "$R/etc/mbsyncrc"
+check "mbsync: tls to provider"   "SSLType IMAPS"                   "$R/etc/mbsyncrc"
+check "mbsync: far/near stores"   "Master :timfelgentreff_gmail_com-remote:" "$R/etc/mbsyncrc"
+check "mbsync: near store"        "Slave :timfelgentreff_gmail_com-local:"  "$R/etc/mbsyncrc"
+check "mbsync: subfolders verbatim" "SubFolders Verbatim"            "$R/etc/mbsyncrc"
+check "mbsync: gmail All Mail only" "Patterns \"[Google Mail]/All Mail\"" "$R/etc/mbsyncrc"
+check "mbsync: outlook all folders" "Patterns *"                 "$R/etc/mbsyncrc"
+check "mbsync: sync state"        "SyncState *"                    "$R/etc/mbsyncrc"
+check "mbsync: pull only"         "Sync Pull"                       "$R/etc/mbsyncrc"
+check "mbsync: gmail folder"      "Path /media/nas/Mail/timfelgentreff_gmail_com/" "$R/etc/mbsyncrc"
+checknot "mbsync: no proxy port"    "Port 1993"                      "$R/etc/mbsyncrc"
+checknot "mbsync: no shared password" "^Pass "                       "$R/etc/mbsyncrc"
+check "msmtp: xoauth2"            "auth xoauth2"                    "$R/etc/msmtprc"
+check "msmtprc: gmail smtp host"  "host smtp.gmail.com"             "$R/etc/msmtprc"
+check "msmtprc: outlook smtp host" "host smtp.office365.com"        "$R/etc/msmtprc"
+check "msmtprc: token from pizauth" "passwordeval /usr/local/bin/pizauth show someone_outlook_com" "$R/etc/msmtprc"
+check "msmtprc: starttls on 587"  "tls_starttls on"                 "$R/etc/msmtprc"
+check "msmtprc: default is account 1" "account default : timfelgentreff_gmail_com" "$R/etc/msmtprc"
+check "maps file lists both"      "someone_outlook_com.provider=outlook" "$R/etc/nasrpi-mailmaps"
+check "mail cron installed"       "nasrpi-mail-sync.sh"             "$R/etc/cron.d/nasrpi-mail-sync"
+check "mail cron schedule"        "15 3 * * 0 root"                 "$R/etc/cron.d/nasrpi-mail-sync"
+check "mail sync waits for the NAS" "mountpoint -q /media/nas"       "$R/usr/local/bin/nasrpi-mail-sync.sh"
+check "mail sync skips when pizauth is down" "not answering" "$R/usr/local/bin/nasrpi-mail-sync.sh"
+checknot "mail sync never waits/polls" '^for i in|sleep 2'      "$R/usr/local/bin/nasrpi-mail-sync.sh"
+# nothing may still mention the python proxy we replaced
+if grep -rIl emailproxy "$R" 2>/dev/null | grep -q .; then
+  echo "  FAIL: generated files still mention emailproxy"
+  grep -rIl emailproxy "$R" | sed 's/^/    /'; fail=$((fail+1))
+else
+  echo "  PASS: no emailproxy left in the generated tree"; pass=$((pass+1))
+fi
+# every generated shell helper must parse
+for h in "$R"/usr/local/bin/pizauth "$R"/usr/local/bin/nasrpi-pizauth-* \
+         "$R"/usr/local/bin/nasrpi-mail-sync.sh; do
+  if ! sh -n "$h" 2>/dev/null; then
+    echo "  FAIL: $(basename "$h") is not valid shell"; fail=$((fail+1))
+  fi
+done
+echo "  PASS: all generated helpers parse"; pass=$((pass+1))
+# real parsers, when available
 if command -v mbsync >/dev/null 2>&1; then
-  if mbsync -c "$R/etc/mbsyncrc" -n -a 2>&1 | grep -qE "not recognized|malformed"; then
-    echo "  FAIL: mbsync rejects generated config"; fail=$((fail+1))
+  if mbsync -c "$R/etc/mbsyncrc" -n -a 2>&1 | grep -qiE "not recognized|malformed|bad "; then
+    echo "  FAIL: mbsync rejects the generated config"; fail=$((fail+1))
   else
     echo "  PASS: generated mbsyncrc parses (isync)"; pass=$((pass+1))
   fi
 fi
-check "msmtprc: explicit plain auth" "auth plain"                        "$R/etc/msmtprc"
-checknot "msmtprc: no auto auth"    "^auth on"                            "$R/etc/msmtprc"
+if command -v msmtp >/dev/null 2>&1; then
+  if msmtp --conflict=quit --conf-file="$R/etc/msmtprc" --serverinfo 2>&1 | grep -qiE "unknown|unknown"; then
+    echo "  FAIL: msmtp rejects the generated config"; fail=$((fail+1))
+  else
+    echo "  PASS: generated msmtprc parses (msmtp)"; pass=$((pass+1))
+  fi
+fi
 
 echo "=== 02 rerun: idempotent, no re-prompts"
+conf_before=$(md5sum "$R/etc/pizauth.conf")
 sum_before=$(md5sum "$R/etc/mbsyncrc")
-runtest 02b '' ./02_setup_emailproxy_mbsync_sendmail.sh
+runtest 02b '' ./02_setup_pizauth_mbsync_sendmail.sh
 [ "$sum_before" = "$(md5sum "$R/etc/mbsyncrc")" ] \
   && { echo "  PASS: mbsyncrc stable on rerun"; pass=$((pass+1)); } \
   || { echo "  FAIL: mbsyncrc changed on rerun"; fail=$((fail+1)); }
+[ "$conf_before" = "$(md5sum "$R/etc/pizauth.conf")" ] \
+  && { echo "  PASS: pizauth.conf stable on rerun"; pass=$((pass+1)); } \
+  || { echo "  FAIL: pizauth.conf changed on rerun"; fail=$((fail+1)); }
 check "cron reported already correct" "already correct" "$T/02b.out"
 check "mbsyncrc reported up to date"  "already up to date" "$T/02b.out"
+checknot "rerun does not re-ask about storage" "Keep a token dump" "$T/02b.out"
 
 echo "=== 03 smartmontools"
 runtest 03 'alerts@example.com\ny\n' ./03_setup_smartmontools.sh
@@ -336,6 +368,15 @@ for f in "$R"/etc/cron.d/nasrpi-*; do
     echo "  FAIL: bad cron line in $f"; fail=$((fail+1))
   fi
 done
+
+echo "=== pizauth seal/unseal helpers (real gpg, unprivileged)"
+if ./test_pizauth_seal.sh > "$T/seal.out" 2>&1; then
+  echo "  PASS: LAN-sealed token dump works"; pass=$((pass+1))
+  tail -2 "$T/seal.out" | sed 's/^/    /'
+else
+  echo "  FAIL: pizauth seal tests failed (full output: $T/seal.out)"; fail=$((fail+1))
+  tail -20 "$T/seal.out" | sed 's/^/    /'
+fi
 
 echo
 echo "passed: $pass  failed: $fail"

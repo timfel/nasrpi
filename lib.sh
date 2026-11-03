@@ -174,8 +174,8 @@ write_file() {
   else
     SUDO=""
   fi
-  "$SUDO" mkdir -p "$(dirname "$target")"
-  "$SUDO" cp "$tmp" "$target" && "$SUDO" chmod "$mode" "$target"
+  $SUDO mkdir -p "$(dirname "$target")"
+  $SUDO cp "$tmp" "$target" && "$SUDO" chmod "$mode" "$target"
   rm -f "$tmp"
   ok "wrote $target"
 }
