@@ -882,6 +882,10 @@ build_mbsyncrc() {
     esac
     echo "Patterns $(mget "$name" patterns)"
     echo "SyncState *"
+    echo "Create Near"
+    echo "Remove Near"
+    echo "Expunge Near"
+    echo "CopyArrivalDate yes"
     echo "Sync Pull"
     echo
   done < "$TMP/accounts"
