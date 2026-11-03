@@ -197,7 +197,7 @@ edit_file() {
   else
     SUDO=""
   fi
-  "$SUDO" "${EDITOR:-$(command -v emacs || command -v vi)}" "$f"
+  $SUDO "${EDITOR:-$(command -v emacs || command -v vi)}" "$f"
 }
 
 # Ask for a destination under /media/nas/<name> for an item (remotes, mailboxes)

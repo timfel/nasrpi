@@ -887,7 +887,7 @@ build_mbsyncrc() {
   done < "$TMP/accounts"
 }
 
-build_mbsyncrc | write_file 644 "$MBSYNCRC" "sudo" || true
+write_file 644 "$MBSYNCRC" "sudo" < <(build_mbsyncrc) || true
 
 # --- mail directories --------------------------------------------------------
 if mountpoint -q /media/nas 2>/dev/null || [ -d /media/nas ]; then
@@ -984,7 +984,7 @@ else
     warn "Using the first account for sendmail: $SMTP_DEFAULT"
   fi
 fi
-build_msmtprc | write_file 600 "$MSMTPRC" "sudo" || true
+write_file 600 "$MSMTPRC" "sudo" < <(build_msmtprc) || true
 
 # --- proof that the whole chain works ---------------------------------------
 if [ "${DRY_RUN:-0}" = "1" ]; then
