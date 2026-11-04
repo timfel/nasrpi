@@ -63,6 +63,9 @@ trap 'rm -f "$TMP" "$BADLIST"' EXIT
     # whole disks only: sdX with no partition number
     found=1
     echo "===== $dev ====="
+    # run once to wake up the device, then sleep
+    smartctl -a "$dev" 2>&1
+    sleep 5
     if ! out=$(smartctl -a "$dev" 2>&1); then
       echo "WARNING: smartctl returned an error for $dev"
       echo "$out"
