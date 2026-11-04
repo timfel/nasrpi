@@ -54,7 +54,7 @@ if [ ! -f "$MAPS_FILE" ] && { [ "${DRY_RUN:-0}" != "1" ] || [ -n "${NASRPI_DRY_R
   tmp=$(mktemp)                        # build in /tmp, move into place with sudo
   for r in "${REMOTES[@]}"; do
     d=$(derive_name "$r")
-    read -r -p "  Folder under /media/nas for '$r' [${d}]: " custom || custom=""
+    nasrpi_read custom "  Folder under /media/nas for '$r' [${d}]: " || custom=""
     echo "${r}=${custom:-$d}" >> "$tmp"
   done
   $NASRPI_SUDO mkdir -p "$(dirname "$MAPS_FILE")"

@@ -22,6 +22,42 @@ else
   NASRPI_SUDO="sudo"
 fi
 
+# --- interactive input ---------------------------------------------------------
+# Questions must be answered from the terminal, not from stdin: callers hand
+# content to functions on stdin (write_file reads the new file there, loops eat
+# pipes), and a read from stdin in that situation swallows data instead of
+# asking -- the prompt never appears and the answer silently becomes "no".
+# So the questions read from fd 9, attached once here (before any caller
+# redirects stdin):
+#   NASRPI_INPUT=path      ... what to ask on (test harness: /dev/stdin)
+#   default /dev/tty       ... the real terminal, even via ssh / `curl | sh`
+#   else stdin             ... no terminal available at all
+NASRPI_INPUT_FD=""
+# NB: never write `exec 9< x 2>/dev/null' -- a redirection given to exec sticks
+# to the shell, so that would silence stderr (prompts, warn, die) forever.
+# Hence the readability tests up front and the redirections inside a group.
+if { exec 9< "${NASRPI_INPUT:-/dev/tty}"; } 2>/dev/null; then
+  NASRPI_INPUT_FD=9
+elif { exec 9<&0; } 2>/dev/null; then
+  NASRPI_INPUT_FD=9
+fi
+
+# nasrpi_read VAR "prompt" -> read one line from the interactive input into VAR;
+# returns 1 on EOF (so callers can fall back to a default).  The prompt is
+# printed here rather than via `read -p', which bash only shows when the fd it
+# reads from looks like a terminal.
+nasrpi_read() {
+  local __var=$1 __prompt=$2 __ans="" __rc=0
+  printf '%s' "$__prompt" >&2
+  if [ -n "$NASRPI_INPUT_FD" ]; then
+    read -u "$NASRPI_INPUT_FD" -r __ans || __rc=1
+  else
+    read -r __ans || __rc=1
+  fi
+  printf -v "$__var" '%s' "$__ans"
+  return "$__rc"
+}
+
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m  [ok]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m  [!!]\033[0m %s\n' "$*"; }
@@ -31,7 +67,7 @@ die()  { printf '\033[31m  [xx]\033[0m %s\n' "$*" >&2; exit 1; }
 ask() {
   local __var=$1 __prompt=$2 __default=${3:-} __answer
   while :; do
-    if ! read -r -p "  ${__prompt}${__default:+ [${__default}]}: " __answer; then
+    if ! nasrpi_read __answer "  ${__prompt}${__default:+ [${__default}]}: "; then
       # EOF: fall back to the default, or give up if there is none
       [ -n "$__default" ] || { echo; die "no input for '${__prompt}' and no default"; }
       __answer="$__default"
@@ -45,7 +81,7 @@ ask() {
 
 confirm() {
   local reply
-  read -r -p "  $* [y/N] " reply || reply="n"
+  nasrpi_read reply "  $* [y/N] " || reply="n"
   [[ "$reply" =~ ^[Yy] ]]
 }
 
@@ -54,19 +90,19 @@ ask_dow_hour() {
   local p=$1 dow hour min
   echo "  Cron day of week? 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat"
   while :; do
-    read -r -p "  Day [${NASRPI_DOW}]: " dow || dow=""
+    nasrpi_read dow "  Day [${NASRPI_DOW}]: " || dow=""
     dow=${dow:-$NASRPI_DOW}
     [[ "$dow" =~ ^[0-6]$ ]] && break
     echo "  Pick 0-6."
   done
   while :; do
-    read -r -p "  Hour 0-23 [${NASRPI_HOUR}]: " hour || hour=""
+    nasrpi_read hour "  Hour 0-23 [${NASRPI_HOUR}]: " || hour=""
     hour=${hour:-$NASRPI_HOUR}
     [[ "$hour" =~ ^[0-9]{1,2}$ ]] && [ "$hour" -le 23 ] && break
     echo "  Pick 0-23."
   done
   while :; do
-    read -r -p "  Minute 0-59 [${NASRPI_MIN}]: " min || min=""
+    nasrpi_read min "  Minute 0-59 [${NASRPI_MIN}]: " || min=""
     min=${min:-$NASRPI_MIN}
     [[ "$min" =~ ^[0-9]{1,2}$ ]] && [ "$min" -le 59 ] && break
     echo "  Pick 0-59."
