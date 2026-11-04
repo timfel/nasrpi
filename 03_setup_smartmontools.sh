@@ -11,6 +11,7 @@ set -euo pipefail
 
 SMARTCTL_CFG="$NASRPI_ETC_DIR/smartd.conf"
 ALERT_BIN="/usr/local/bin/nasrpi-smartd-alert.sh"   # write_file applies the dry-run shadow
+REPORT_BIN="/usr/local/bin/nasrpi-smart-report.sh"
 
 say "03 - smartmontools"
 apt_install smartmontools   # sendmail (msmtp-mta) comes from step 02
@@ -41,12 +42,6 @@ done
 
 build_smartd() {
   echo "# Managed by nasrpi setup scripts -- rerun 03 after adding/removing disks."
-  echo "# -n standby,q : no check when in standby"
-  echo "# -a : all SMART checks (health, Usage & Prefail changes, error and selftest logs),"
-  echo "# -m : mail on any failures"
-  echo "# -I <id> : mail immediately whenever these raw attributes change --"
-  echo "# zero tolerance: 5 reallocated, 187 uncorrected, 197 pending, 198 uncorrectable."
-  echo "# -M exec : run the nasrpi alert handler (device as arg, report on stdin)."
   local d
   for d in "${MON[@]}"; do
     echo "$d -n standby,q -a -m $NOTIFY_EMAIL -I 5 -I 187 -I 197 -I 198 -M exec $ALERT_BIN"
@@ -57,7 +52,7 @@ build_smartd() {
 existing=""
 if [ -f "$SMARTCTL_CFG" ]; then
   existing=$(grep -v '^# Managed by nasrpi' "$SMARTCTL_CFG" \
-             | grep -v ' -M exec $ALERT_BIN' || true)
+             | grep -v " -M exec $ALERT_BIN" || true)
 fi
 { [ -n "$existing" ] && echo "$existing"; build_smartd; } | write_file 644 "$SMARTCTL_CFG" "sudo" "force" || true
 
@@ -120,5 +115,62 @@ fi
   echo "\$REPORT"
 } | sendmail -t || echo "nasrpi: FAILED to mail SMART alert for \$DEV" >&2
 EOF
+
+# --- daily SMART status report --------------------------------------------------
+# Use the same stable by-id paths as smartd and report the attributes watched
+# above. smartctl -A output preserves vendor-specific raw values for review.
+cat <<'EOF' | write_file 755 "$REPORT_BIN" "sudo" "force"
+#!/bin/bash
+set -u
+TO=__NOTIFY_EMAIL__
+BY_ID_DIR=__BY_ID_DIR__
+SENDMAIL=/usr/sbin/sendmail
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+
+{
+  echo "nasrpi daily SMART status — $(date '+%F')"
+  echo
+  shopt -s nullglob
+  found=0
+  for link in "$BY_ID_DIR"/*; do
+    [ -L "$link" ] || continue
+    dev=$(readlink -f "$link")
+    [[ $dev =~ ^/dev/sd[a-z]+$ ]] || continue
+    # Only report one by-id name for each physical device, as in setup.
+    case " ${seen:-} " in *" $dev "*) continue ;; esac
+    seen="${seen:-} $dev"
+    found=1
+    echo "===== $(basename "$link") ($dev) ====="
+    if ! smartctl -a "$link"; then
+      echo "WARNING: smartctl returned an error for $link"
+    fi
+    echo
+  done
+  [ "$found" -eq 1 ] || echo "No monitored ATA disks found under $BY_ID_DIR."
+} > "$TMP" 2>&1
+{
+  echo "To: $TO"
+  echo "Subject: nasrpi daily SMART status — $(date '+%F')"
+  echo "Content-Type: text/plain; charset=UTF-8"
+  echo
+  cat "$TMP"
+} | "$SENDMAIL" -t
+EOF
+# Substitute configuration values into the installed script safely.
+# (These values are administrator-provided local paths/address.)
+# The quoted heredoc above keeps shell expansion for runtime, then sed embeds config.
+# Re-write through a temporary generated copy to avoid placeholders in the script.
+REPORT_TMP=$(mktemp)
+sed -e "s|__NOTIFY_EMAIL__|$NOTIFY_EMAIL|g" \
+    -e "s|__BY_ID_DIR__|$BY_ID_DIR|g" \
+    "$(drify "$REPORT_BIN")" > "$REPORT_TMP"
+write_file 755 "$REPORT_BIN" "sudo" "force" < "$REPORT_TMP"
+rm -f "$REPORT_TMP"
+
+ask SMART_REPORT_HOUR "Daily SMART report hour (0-23)" "7"
+[[ "$SMART_REPORT_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]] || die "hour must be 0-23"
+# Install directly: /etc/cron.d supports daily timing independent of weekly helpers.
+install_cron nasrpi-smart-report "* $SMART_REPORT_HOUR 0" "/usr/local/bin/nasrpi-smart-report.sh"
 
 say "03 done. Test with: echo test | sudo $ALERT_BIN /dev/sda"
