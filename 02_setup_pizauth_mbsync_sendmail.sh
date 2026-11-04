@@ -935,6 +935,7 @@ mountpoint -q /media/nas || { echo "/media/nas is not mounted -- skipping the ma
 "$PIZAUTH_WRAPPER" status >/dev/null 2>&1 \
   || { echo "pizauth is not answering (systemctl status pizauth) -- skipping the mail sync"; exit 0; }
 exec mbsync -c $MBSYNCRC -a
+chown -R "$USER" /media/nas/Mail/
 EOF
 
 # --- weekly sync cron --------------------------------------------------------
