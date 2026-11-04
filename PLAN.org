@@ -49,11 +49,13 @@
      this replaced (service, /opt/emailproxy, its cron entry)
 
 03
-   - setup smartmontools to monitor all my disks, but make sure they do not
-     spin up for SMART testing if they are currently idle. tell it to use
-     =sendmail= to inform me when sometehing degrades
-   - if smart data shows failure indicators (read errors or relocated sectors),
-     unmount the failing drives
+   - no smartd: the daemon wakes the USB disks too much, and some of them
+     spin up even when it only checks whether they are spinning. install
+     smartmontools for =smartctl= only, and disable any leftover smartd
+   - the daily cron job runs =smartctl= once per disk and mails me the
+     report; it greps for the bad indicators (attrs 5, 187, 197, 198 and
+     overall-health) and if any of them has gone up from 0, the mail goes
+     out with an ALARM ALARM ALARM subject line
 04
    - set up =rclone= and give me a chance to set up any remotes i need
    - set up a weekly cron job that syncs all remotes configured in rclone to

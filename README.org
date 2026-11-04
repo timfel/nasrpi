@@ -59,19 +59,22 @@ mbsync and msmtp ask it for a token instead of ever knowing a password.
   ="[Google Mail]/All Mail"=, which already contains inbox and sent mail; Outlook
   and everything else pull =*=.
 
-*** 03 — smartmontools
+*** 03 — SMART daily report (smartmontools, *no smartd*)
 
-- Installs smartmontools to monitor all disks *via =/dev/disk/by-uuid=*.
-  Schedules short tests nightly and long tests weekly, but *never spins up
-  spun-down disks* (=-d maint=).
-- smartd sends alert mail itself; each alert also runs a =-M exec= handler:
-  =/usr/local/bin/nasrpi-smartd-alert.sh=. The device is passed as an argument
-  and the report arrives on stdin. The handler logs to
-  =/var/log/nasrpi-smart-alert.log= and *unmounts the failing disk*
-  (=AUTO_UNMOUNT= at its top).
-- *Zero tolerance:* =-I 5 -I 187 -I 197 -I 198= sends mail and triggers the
-  handler as soon as reallocated, uncorrected or pending sector counts change at
-  all.
+- Installs smartmontools for =smartctl= but does *not* run smartd and does not
+  touch =/etc/smartd.conf=: the daemon polls the disks all day and wakes them
+  up, and some USB disks even spin up when smartd only asks “are you
+  spinning?” (=smartd -n standby=). If a smartd service from an earlier setup
+  is still enabled, the script offers to disable it.
+- Instead it installs a *daily cron job* (at a time of day you pick) that runs
+  =smartctl -a= once per disk — =/dev/sd?=, so reconnects shuffling the names
+  is harmless — and mails you the status. At most one spin-up per disk per
+  day; the rest of the day nothing polls the disks.
+- *Zero tolerance:* the script greps the =smartctl= output for the bad
+  indicators — raw values of attributes =5= (reallocated sectors), =187=
+  (reported uncorrect), =197= (pending sectors), =198= (offline
+  uncorrectable) — plus the overall-health verdict. If any of them has gone
+  above 0, the mail goes out with an *ALARM ALARM ALARM* subject line.
 
 *** 04 — rclone
 
@@ -105,10 +108,10 @@ Skips a pair when either of its mounts is missing.
   commands), =sudo /usr/local/bin/pizauth status|show <account>|refresh=.
 - Backup knobs (~NOTIFY_EMAIL~, ~DELETE_PCT~): top of
   =/usr/local/bin/nasrpi-backup.sh=.
-- SMART alert behaviour: ~AUTO_UNMOUNT~ at the top of
-  =/usr/local/bin/nasrpi-smartd-alert.sh= (set ~no~ for log/mail only); watched
-  attributes are the =-I= list in =/etc/smartd.conf= (zero tolerance by default).
-  Rerun 03 after adding or removing disks.
+- SMART report knobs (~TO~, ~BAD_ATTRS~, ~SENDMAIL~): top of
+  =/usr/local/bin/nasrpi-smart-report.sh=; schedule in
+  =/etc/cron.d/nasrpi-smart-report= (or rerun 03). Disks are discovered at
+  run time, so adding or removing one needs no re-setup.
 - Backup source/dest pairs: ~PAIRS~ at the top of
   =/usr/local/bin/nasrpi-backup.sh~ (one ~source dest~ line per pair).
 

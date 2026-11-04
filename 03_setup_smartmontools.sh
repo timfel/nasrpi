@@ -1,171 +1,120 @@
 #!/usr/bin/env bash
 # 03_setup_smartmontools.sh
-# - monitor all physical disks with smartd (entries via /dev/disk/by-uuid)
-# - defer self-tests while disks are idle/spun-down (smartd -d maint)
-# - smartd mails alerts itself (sendmail = msmtp shim from step 02)
-# - plus a -M exec handler: on any alert smartd runs it with the device as
-#   argument and the report on stdin; it logs and (optionally) unmounts the
-#   failing disk. No separate cron checker needed.
+# - NO smartd: the daemon wakes USB disks constantly, and some of them spin
+#   up even when smartd only asks "are you spinning?" (-n standby) -- so the
+#   daemon is worse than useless here. We do NOT run smartd and do not
+#   touch /etc/smartd.conf.
+# - instead: a daily cron job runs smartctl ONCE per disk (one spin-up per
+#   disk per day at most, at a time of day you pick), mails you the status,
+#   and greps the report for the bad indicators (raw values of SMART attrs
+#   5, 187, 197, 198 and the overall-health verdict). If any of them has
+#   gone above 0, the mail goes out with an ALARM ALARM ALARM subject line.
+# - the report simply walks /dev/sd? at runtime: every whole disk gets
+#   checked, so it does not matter if reconnects reshuffle the names.
+# - smartmontools is still installed (it provides smartctl); if a smartd
+#   service from an earlier setup is still running, we disable it.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-SMARTCTL_CFG="$NASRPI_ETC_DIR/smartd.conf"
-ALERT_BIN="/usr/local/bin/nasrpi-smartd-alert.sh"   # write_file applies the dry-run shadow
 REPORT_BIN="/usr/local/bin/nasrpi-smart-report.sh"
 
-say "03 - smartmontools"
-apt_install smartmontools   # sendmail (msmtp-mta) comes from step 02
+say "03 - SMART daily report (no smartd)"
+apt_install smartmontools   # provides smartctl; sendmail (msmtp-mta) comes from step 02
 
-ask NOTIFY_EMAIL "Address to receive SMART alerts" "root"
+ask NOTIFY_EMAIL "Address to receive SMART reports" "root"
 
-# --- which disks to monitor -----------------------------------------------------
-# smartd entries use stable /dev/disk/by-uuid/<uuid> paths where a filesystem
-# UUID exists (survives reconnects/port changes); falls back to /dev/sdX.
-MON=()
-declare -A seen        # avoid double-monitoring the same disk via id aliases
-BY_ID_DIR="${NASRPI_BY_ID_DIR:-/dev/disk/by-id}"   # test hook: fake by-id tree
-for link in "$BY_ID_DIR"/*; do
-  [ -L "$link" ] || continue
-  tgt=$(readlink -f "$link")
-  # keep only whole /dev/sdX disks (no partitions, no mmcblk/nvme/loop/dm)
-  case ${tgt#/dev/} in
-    sd[a-z]*) ;;                                  # looks like sdX...
-    *) continue ;;
-  esac
-  [[ $tgt =~ ^/dev/sd[a-z]+$ ]] || continue       # ...and not sdX1/part-style
-  [[ -n ${seen[$tgt]:-} ]] && continue            # already have an id for this disk
-  seen[$tgt]=1
-  MON+=("$link")
-  echo "  $tgt -> $link"
-done
-[ ${#MON[@]} -eq 0 ] && warn "no /dev/disk/by-id entries pointing to /dev/sdX disks"
-
-build_smartd() {
-  echo "# Managed by nasrpi setup scripts -- rerun 03 after adding/removing disks."
-  local d
-  for d in "${MON[@]}"; do
-    echo "$d -n standby,q -a -m $NOTIFY_EMAIL -I 5 -I 187 -I 197 -I 198 -M exec $ALERT_BIN"
-  done
-}
-
-# replace our previously managed block, keep any hand-written lines
-existing=""
-if [ -f "$SMARTCTL_CFG" ]; then
-  existing=$(grep -v '^# Managed by nasrpi' "$SMARTCTL_CFG" \
-             | grep -v " -M exec $ALERT_BIN" || true)
-fi
-{ [ -n "$existing" ] && echo "$existing"; build_smartd; } | write_file 644 "$SMARTCTL_CFG" "sudo" "force" || true
-
-if [ "${DRY_RUN:-0}" != "1" ]; then
-  if confirm "Restart the smartmontools service now?"; then
-    $NASRPI_SUDO systemctl restart smartmontools && ok "smartmontools restarted"
+# --- make sure the smartd daemon is gone -----------------------------------------
+# The package installs and enables smartd; smartd polls disks all day and
+# wakes them up. If it is around from an earlier setup, disable it.
+if [ "${DRY_RUN:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+  if $NASRPI_SUDO systemctl is-enabled smartmontools >/dev/null 2>&1 \
+     || $NASRPI_SUDO systemctl is-active smartmontools >/dev/null 2>&1; then
+    warn "smartd is active/enabled -- it wakes USB disks constantly."
+    if confirm "Disable the smartd service (the daily cron report replaces it)?"; then
+      $NASRPI_SUDO systemctl disable --now smartmontools && ok "smartd disabled"
+    fi
+  else
+    ok "smartd is not enabled"
   fi
 fi
 
-# --- alert handler ---------------------------------------------------------------
-# smartd runs it for every alert it mails, e.g.:
-#   nasrpi-smartd-alert.sh /dev/disk/by-uuid/xxxx   (full report on stdin)
-# With -M exec smartd hands the alert mail to the handler INSTEAD of mailing
-# it itself -- the handler logs, unmounts, and mails the report via sendmail.
-ask AUTO_UNMOUNT "Auto-unmount disks when smartd reports a failure? (else log/mail only)" "y"
-
-cat <<EOF | write_file 755 "$ALERT_BIN" "sudo"
-#!/bin/sh
-# nasrpi: smartd alert handler (-M exec target).
-# Called by smartd as:  \$0 <device>   with the alert report on stdin.
-# IMPORTANT: with -M exec, smartd pipes the mail to US INSTEAD of mailing
-# it -- this handler IS the mailer. We log, unmount, then send via
-# sendmail (msmtp shim from step 02).
-# Managed by nasrpi setup scripts (03). Set AUTO_UNMOUNT=no below for
-# alert-only behaviour (no unmounting).
-AUTO_UNMOUNT=$([ "$AUTO_UNMOUNT" = "y" ] && echo yes || echo no)
-NOTIFY_EMAIL=$NOTIFY_EMAIL       # fallback recipient if SMARTD_ADDRESS is unset
-DEV="\${1:-\$SMARTD_DEVICE}"
-LOG=/var/log/nasrpi-smart-alert.log
-
-REPORT=\$(cat)          # the alert report smartd piped in on stdin
-
-{
-  echo "===== \$(date '+%F %T') SMART alert for \$DEV ====="
-  echo "\$REPORT"
-  echo
-} >> "\$LOG" 2>/dev/null || true
-
-NOTES=""
-if [ "\$AUTO_UNMOUNT" = yes ]; then
-  NOTES=\$(
-    for mp in \$(lsblk -rno MOUNTPOINT "\$DEV" 2>/dev/null | grep .); do
-      if umount -R "\$mp" 2>/dev/null; then
-        echo "nasrpi: UNMOUNTED \$mp (failing disk \$DEV)"
-      else
-        echo "nasrpi: could NOT unmount \$mp (failing disk \$DEV)"
-      fi
-    done
-  )
-fi
-
-# we are the mailer now: send the report plus our notes
-{
-  echo "To: \${SMARTD_ADDRESS:-\$NOTIFY_EMAIL}"
-  echo "Subject: \${SMARTD_SUBJECT:-nasrpi: SMART alert for \$DEV}"
-  echo
-  [ -n "\$NOTES" ] && echo "\$NOTES"
-  echo "nasrpi: SMART alert for \$DEV at \$(date '+%F %T'); full report also in \$LOG."
-  echo
-  echo "\$REPORT"
-} | sendmail -t || echo "nasrpi: FAILED to mail SMART alert for \$DEV" >&2
-EOF
-
 # --- daily SMART status report --------------------------------------------------
-# Use the same stable by-id paths as smartd and report the attributes watched
-# above. smartctl -A output preserves vendor-specific raw values for review.
-cat <<'EOF' | write_file 755 "$REPORT_BIN" "sudo" "force"
+# One smartctl -a per disk per day; greps the bad indicators out of the
+# output. Zero tolerance: any non-zero raw value for attrs 5 (reallocated
+# sectors), 187 (reported uncorrect), 197 (pending sectors) or 198
+# (offline uncorrectable) -- or a FAILED overall-health line -- is an ALARM.
+REPORT_TMP=$(mktemp)
+cat <<'EOF' > "$REPORT_TMP"
 #!/bin/bash
 set -u
 TO=__NOTIFY_EMAIL__
-BY_ID_DIR=__BY_ID_DIR__
-SENDMAIL=/usr/sbin/sendmail
+SENDMAIL=${SENDMAIL:-/usr/sbin/sendmail}
+BAD_ATTRS="5 187 197 198"   # raw value must stay at zero, no exceptions
 TMP=$(mktemp)
-trap 'rm -f "$TMP"' EXIT
+BADLIST=$(mktemp)
+trap 'rm -f "$TMP" "$BADLIST"' EXIT
 
 {
-  echo "nasrpi daily SMART status — $(date '+%F')"
+  echo "nasrpi daily SMART status - $(date '+%F')"
   echo
   shopt -s nullglob
   found=0
-  for link in "$BY_ID_DIR"/*; do
-    [ -L "$link" ] || continue
-    dev=$(readlink -f "$link")
-    [[ $dev =~ ^/dev/sd[a-z]+$ ]] || continue
-    # Only report one by-id name for each physical device, as in setup.
-    case " ${seen:-} " in *" $dev "*) continue ;; esac
-    seen="${seen:-} $dev"
+  for dev in /dev/sd?; do
+    # whole disks only: sdX with no partition number
     found=1
-    echo "===== $(basename "$link") ($dev) ====="
-    if ! smartctl -a "$link"; then
-      echo "WARNING: smartctl returned an error for $link"
+    echo "===== $dev ====="
+    if ! out=$(smartctl -a "$dev" 2>&1); then
+      echo "WARNING: smartctl returned an error for $dev"
+      echo "$out"
     fi
+    # overall health verdict + the attribute rows we watch
+    echo "$out" | grep -i 'SMART overall-health' || echo "overall health: (not reported)"
+    printf '%s\n' "$out" | awk '$1=="ID#" || $1 ~ /^(5|187|197|198)$/'
+    # zero-tolerance probe: has any bad indicator gone above 0?
+    bad=0
+    for a in $BAD_ATTRS; do
+      raw=$(printf '%s\n' "$out" | awk -v id="$a" '$1==id {print $NF; exit}')
+      case "$raw" in
+        ''|*[!0-9]*) ;;                              # not a plain number -> ignore
+        *) if [ "$raw" -gt 0 ]; then
+             echo "$dev: attribute $a raw value $raw (must be 0)" >> "$BADLIST"
+             bad=1
+           fi ;;
+      esac
+    done
+    if printf '%s\n' "$out" | grep -qi 'SMART overall-health.*FAILED'; then
+      echo "$dev: overall-health self-assessment FAILED" >> "$BADLIST"
+      bad=1
+    fi
+    [ "$bad" -eq 1 ] && echo ">>> ALARM ALARM ALARM: bad indicators on $dev"
     echo
   done
-  [ "$found" -eq 1 ] || echo "No monitored ATA disks found under $BY_ID_DIR."
+  [ "$found" -eq 1 ] || echo "No /dev/sd? disks found."
 } > "$TMP" 2>&1
+
+# ALARM subject line when any watched indicator went above 0
+if [ -s "$BADLIST" ]; then
+  alarms=$(cut -d: -f1 < "$BADLIST" | sort -u | tr '\n' ' ')
+  SUBJECT="ALARM ALARM ALARM - nasrpi SMART ($alarms) - $(date '+%F')"
+else
+  SUBJECT="nasrpi daily SMART status - $(date '+%F')"
+fi
 {
   echo "To: $TO"
-  echo "Subject: nasrpi daily SMART status — $(date '+%F')"
+  echo "Subject: $SUBJECT"
   echo "Content-Type: text/plain; charset=UTF-8"
   echo
+  if [ -s "$BADLIST" ]; then
+    echo "ALARM ALARM ALARM - a watched SMART indicator has gone above zero:"
+    cat "$BADLIST"
+    echo
+  fi
   cat "$TMP"
 } | "$SENDMAIL" -t
 EOF
-# Substitute configuration values into the installed script safely.
-# (These values are administrator-provided local paths/address.)
-# The quoted heredoc above keeps shell expansion for runtime, then sed embeds config.
-# Re-write through a temporary generated copy to avoid placeholders in the script.
-REPORT_TMP=$(mktemp)
-sed -e "s|__NOTIFY_EMAIL__|$NOTIFY_EMAIL|g" \
-    -e "s|__BY_ID_DIR__|$BY_ID_DIR|g" \
-    "$(drify "$REPORT_BIN")" > "$REPORT_TMP"
-write_file 755 "$REPORT_BIN" "sudo" "force" < "$REPORT_TMP"
+# Substitute the recipient address (administrator-provided value).
+sed -e "s|__NOTIFY_EMAIL__|$NOTIFY_EMAIL|g" "$REPORT_TMP" \
+  | write_file 755 "$REPORT_BIN" "sudo" "force"
 rm -f "$REPORT_TMP"
 
 ask SMART_REPORT_HOUR "Daily SMART report hour (0-23)" "7"
@@ -173,9 +122,7 @@ ask SMART_REPORT_HOUR "Daily SMART report hour (0-23)" "7"
 # Install directly: /etc/cron.d supports daily timing independent of weekly helpers.
 install_cron nasrpi-smart-report "* $SMART_REPORT_HOUR 0" "/usr/local/bin/nasrpi-smart-report.sh"
 
-say "03 done. Test with: echo test | sudo $ALERT_BIN /dev/sda
-If you want to configure how often the smart checks happen if some
-disks, for example, do not respect the '-n standby' directive, then
-set /etc/default/smartmontools to use a larger interval (e.g. 86400
-for once per day) and restart the service at the time of day you
-want this."
+say "03 done. Test with: sudo $REPORT_BIN
+The report mails daily at :$SMART_REPORT_HOUR; disks sleep the rest of the
+time because nothing polls them. To tweak the watched attributes or the
+recipient, edit the top of $REPORT_BIN."

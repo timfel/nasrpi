@@ -5,7 +5,7 @@
 #   - pizauth (ltratt/pizauth, an OAuth2 token daemon) built from source with
 #     rustup/cargo AS A NORMAL USER and installed under /opt/pizauth.
 #   - systemd service 'pizauth': starts at boot, config /etc/pizauth.conf, runs
-#     as root -- mbsync's cron job, sendmail and smartd all run as root too, and
+#     as root -- mbsync's cron job, sendmail and the SMART report all run as root, and
 #     pizauth's socket directory is 0700 for whoever runs the server.
 #   - /etc/pizauth.conf: one `account "name" { ... }` block per mail account,
 #     created interactively (Gmail / Office 365 presets). 02 reads accounts back
@@ -976,7 +976,7 @@ if [ "$acct_count" = 1 ]; then
   IFS=$'\t' read -r SMTP_DEFAULT SMTP_EMAIL < "$TMP/accounts"
   ok "single account, sendmail uses: $SMTP_DEFAULT ($SMTP_EMAIL)"
 else
-  echo "  Which account should send system mail (scripts, smartd, cron)?"
+  echo "  Which account should send system mail (scripts, SMART report, cron)?"
   select pick in $(awk -F'\t' '{print $1}' "$TMP/accounts"); do
     if awk -F'\t' -v n="$pick" 'BEGIN{FS="\t"} $1==n{found=1} END{exit !found}' "$TMP/accounts"; then
       SMTP_DEFAULT=$pick

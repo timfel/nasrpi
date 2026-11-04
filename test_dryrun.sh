@@ -10,6 +10,11 @@ T=$(mktemp -d /tmp/nasrpi-test.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 export DRY_RUN=1
 export NASRPI_DRY_ROOT="$T/root"
+# After the confirm/pipe fix in lib.sh, questions read from /dev/tty by default
+# and piped stdin is treated as data. The harness feeds canned answers THROUGH
+# stdin, so point the questions there explicitly -- otherwise running this
+# test from a real terminal would prompt on the terminal and ignore the pipes.
+export NASRPI_INPUT=/dev/stdin
 mkdir -p "$T/bin" "$NASRPI_DRY_ROOT"
 R="$NASRPI_DRY_ROOT"          # all root-owned files land under here
 
@@ -36,21 +41,6 @@ EOF
 chmod +x "$T/bin/lsblk" "$T/bin/blkid"
 export PATH="$T/bin:$PATH"
 
-# --- fake udev by-id tree (deterministic disks + id aliases for 03) ------------
-# 03 scans <by-id>/ata* symlinks; point it at a sandbox tree of our own.
-# Partitions, mmcblk/nvme targets and non-ata links must all be ignored,
-# and the second alias of WDC40 must NOT create a second smartd entry.
-export NASRPI_BY_ID_DIR="$T/by-id"
-mkdir -p "$NASRPI_BY_ID_DIR"
-ln -s /dev/sda  "$NASRPI_BY_ID_DIR/ata-WDC_WD40"
-ln -s /dev/sda  "$NASRPI_BY_ID_DIR/ata-WDC_WD40_alias"   # duplicate id -> ignored
-ln -s /dev/sdb  "$NASRPI_BY_ID_DIR/ata-Seagate_Seagate"
-ln -s /dev/sdc  "$NASRPI_BY_ID_DIR/ata-Samsung_Samsung"
-ln -s /dev/sdd  "$NASRPI_BY_ID_DIR/ata-Toshiba_Toshiba"
-ln -s /dev/sda1 "$NASRPI_BY_ID_DIR/ata-WDC_WD40-part1"     # partition -> ignored
-ln -s /dev/mmcblk0 "$NASRPI_BY_ID_DIR/ata-SD_Card"              # not sdX -> ignored
-ln -s /dev/sdb1 "$NASRPI_BY_ID_DIR/usb-Seagate_usb"         # non-ata -> ignored
-
 pass=0; fail=0
 checknot() {  # checknot NAME REGEXP FILE -- pass when pattern is ABSENT
   if grep -qE -- "$2" "$3" 2>/dev/null; then
@@ -64,6 +54,20 @@ check() {  # check <desc> <fixed-string> <file>
     echo "  PASS: $1"; pass=$((pass+1))
   else
     echo "  FAIL: $1   (wanted '$2' in $3)"; fail=$((fail+1))
+  fi
+}
+checkabsent() {  # checkabsent NAME FILE -- pass when the file does not exist
+  if [ -e "$2" ]; then
+    echo "  FAIL: $1   ($2 must not exist)"; fail=$((fail+1))
+  else
+    echo "  PASS: $1"; pass=$((pass+1))
+  fi
+}
+want() {  # want NAME EXPECTED ACTUAL
+  if [ "$3" = "$2" ]; then
+    echo "  PASS: $1"; pass=$((pass+1))
+  else
+    echo "  FAIL: $1 (got '$3', want '$2')"; fail=$((fail+1))
   fi
 }
 runtest() {  # runtest <name> <printf-answers> <script...>
@@ -230,37 +234,47 @@ check "cron reported already correct" "already correct" "$T/02b.out"
 check "mbsyncrc reported up to date"  "already up to date" "$T/02b.out"
 checknot "rerun does not re-ask about storage" "Keep a token dump" "$T/02b.out"
 
-echo "=== 03 smartmontools"
-runtest 03 'alerts@example.com\ny\n' ./03_setup_smartmontools.sh
-check "smartd monitors sda"       "$NASRPI_BY_ID_DIR/ata-WDC_WD40 -n standby,q -a -m alerts@example.com" "$R/etc/smartd.conf"
-check "smartd covers all disks"    "$NASRPI_BY_ID_DIR/ata-Toshiba_Toshiba -n standby,q" "$R/etc/smartd.conf"
-check "smartd leaves standby alone" "-n standby,q"                      "$R/etc/smartd.conf"
-check "smartd watches attrs"       "-I 5 -I 187 -I 197 -I 198"         "$R/etc/smartd.conf"
-check "smartd EXEC handler"        "-M exec /usr/local/bin/nasrpi-smartd-alert.sh" "$R/etc/smartd.conf"
-checknot "no selftest schedule"     "-s "                               "$R/etc/smartd.conf"
-check "handler takes device arg"   'DEV="${1:-$SMARTD_DEVICE}"'          "$R/usr/local/bin/nasrpi-smartd-alert.sh"
-# one entry per disk: no partitions, no mmcblk/nvme, no duplicate id aliases
-checknot "no partitions monitored"  "part1"                             "$R/etc/smartd.conf"
-checknot "no mmcblk disks"         "mmcblk"                            "$R/etc/smartd.conf"
-checknot "no nvme disks"           "nvme"                              "$R/etc/smartd.conf"
-checknot "duplicate id alias dropped" "ata-WDC_WD40_alias"               "$R/etc/smartd.conf"
-[ "$(grep -c 'ata-WDC_WD40 ' "$R/etc/smartd.conf")" -eq 1 ] \
-  && { echo "  PASS: one smartd entry per disk"; pass=$((pass+1)); } \
-  || { echo "  FAIL: duplicate disk entries in smartd.conf"; fail=$((fail+1)); }
-check "handler auto-unmount on"   "AUTO_UNMOUNT=yes"                   "$R/usr/local/bin/nasrpi-smartd-alert.sh"
-check "handler unmounts failures" "umount -R"                          "$R/usr/local/bin/nasrpi-smartd-alert.sh"
-check "handler logs alerts"       "nasrpi-smart-alert.log"             "$R/usr/local/bin/nasrpi-smartd-alert.sh"
-sh -n "$R/usr/local/bin/nasrpi-smartd-alert.sh" \
-  && { echo "  PASS: alert handler syntax"; pass=$((pass+1)); } \
-  || { echo "  FAIL: alert handler syntax"; fail=$((fail+1)); }
+echo "=== lib: confirm/ask work when stdin carries data (the pipe fix)"
+# confirm must consume exactly ONE answer, never swallow the rest of a pipe
+pipe_rest=$(printf 'y\nleftover\n' | NASRPI_INPUT=/dev/stdin bash -c '
+  . ./lib.sh
+  if confirm "proceed?"; then echo "CONFIRMED rest=[$(cat)]"; else echo DECLINED; fi' 2>/dev/null)
+want "confirm consumes exactly one answer, leaves the rest" "CONFIRMED rest=[leftover]" "$pipe_rest"
+# EOF (no terminal, no answer) must mean "no", not hang or die
+eof_decl=$(printf '' | NASRPI_INPUT=/dev/stdin bash -c '. ./lib.sh; confirm q && echo YES || echo DECLINED' 2>/dev/null)
+want "confirm defaults to no on EOF" "DECLINED" "$eof_decl"
+# a write_file fed via heredoc-pipe must not eat the later confirm answer
+hd_kept=$(printf 'y\n' | NASRPI_INPUT=/dev/stdin DRY_RUN=1 NASRPI_DRY_ROOT="$T/pipefix" bash -c '
+  . ./lib.sh
+  echo some-content | write_file 644 /etc/fake-thing >/dev/null 2>&1
+  confirm "still askable?" && echo ANSWER-KEPT' 2>/dev/null)
+want "confirm survives a heredoc-fed write_file" "ANSWER-KEPT" "$hd_kept"
 
-echo "=== 03 rerun: idempotent (force-replace must not eat answers)"
-sdsum_before=$(md5sum "$R/etc/smartd.conf")
-runtest 03r 'alerts@example.com\ny\n' ./03_setup_smartmontools.sh
-[ "$sdsum_before" = "$(md5sum "$R/etc/smartd.conf")" ] \
-  && { echo "  PASS: smartd.conf stable on rerun"; pass=$((pass+1)); } \
-  || { echo "  FAIL: smartd.conf changed on rerun"; fail=$((fail+1)); }
-check "smartd.conf reported up to date" "already up to date" "$T/03r.out"
+echo "=== 03 smart daily report (no smartd)"
+runtest 03 'alerts@example.com\n7\ny\n' ./03_setup_smartmontools.sh
+REP="$R/usr/local/bin/nasrpi-smart-report.sh"
+check "report mails the right address" 'TO=alerts@example.com'    "$REP"
+check "report probes with smartctl"    "smartctl -a"              "$REP"
+check "report checks whole disks"      "/dev/sd?"                 "$REP"
+check "report watches bad attrs"       'BAD_ATTRS="5 187 197 198"' "$REP"
+check "report greps raw values"        'print $NF'                "$REP"
+check "report ALARM subject"           "ALARM ALARM ALARM"        "$REP"
+check "report cron installed"          "nasrpi-smart-report.sh"   "$R/etc/cron.d/nasrpi-smart-report"
+check "report cron schedule"           "0 7 * * * root"           "$R/etc/cron.d/nasrpi-smart-report"
+checknot "report does not use smartd"  "smartd"                   "$REP"
+checkabsent "no smartd.conf written"       "$R/etc/smartd.conf"
+checkabsent "no smartd alert handler"      "$R/usr/local/bin/nasrpi-smartd-alert.sh"
+bash -n "$REP" \
+  && { echo "  PASS: report script syntax"; pass=$((pass+1)); } \
+  || { echo "  FAIL: report script syntax"; fail=$((fail+1)); }
+
+echo "=== 03 rerun: idempotent (prompts in a pipe must not be eaten)"
+rep_before=$(md5sum "$REP")
+runtest 03r 'alerts@example.com\n\n' ./03_setup_smartmontools.sh
+[ "$rep_before" = "$(md5sum "$REP")" ] \
+  && { echo "  PASS: report script stable on rerun"; pass=$((pass+1)); } \
+  || { echo "  FAIL: report script changed on rerun"; fail=$((fail+1)); }
+check "cron reported already correct" "already correct" "$T/03r.out"
 
 echo "=== 04 rclone"
 runtest 04 'y\n\n2\n4\n0\ny\n' ./04_setup_rclone.sh
@@ -337,33 +351,59 @@ else
   echo "  FAIL: media_backup does not mirror media"; fail=$((fail+1))
 fi
 
-echo "=== 03b: actually RUN the smartd alert handler"
-cat > "$SB/bin/lsblk" <<'EOF'
+echo "=== 03b: actually RUN the generated SMART report script"
+SMB="$T/smart"; mkdir -p "$SMB/bin" "$T/smartdev"
+touch "$T/smartdev/sda" "$T/smartdev/sdb"   # fake whole disks
+cat > "$SMB/bin/sendmail" <<EOF
 #!/bin/sh
+cat >> "$T/smartmail.out"
+EOF
+cat > "$SMB/bin/smartctl" <<'EOF'
+#!/bin/sh
+# fake smartctl -a: healthy attribute table; FAKE_197 / FAKE_HEALTH decide
+# whether the second disk shows bad indicators
+echo "smartctl $* (fake)"
+echo "SMART overall-health self-assessment test result: $FAKE_HEALTH"
+echo "ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE"
 case "$*" in
-  *MOUNTPOINT*) echo "/media/test" ;;   # pretend the failing disk is mounted here
-  *) exit 0 ;;
+  *sdb) echo "197 Current_Pending_Sector  0x0022  100  099  000  Old_age   Always      -       $FAKE_197" ;;
+  *)    echo "  5 Reallocated_Sector_Ct   0x0033  100  100  010  Pre-fail  Always      -       0" ;;
 esac
 EOF
-cat > "$SB/bin/umount" <<EOF
-#!/bin/sh
-echo "umount \$*" >> "$SB/umount.log"
-EOF
-chmod +x "$SB/bin/lsblk" "$SB/bin/umount"
-sed "s|^LOG=.*|LOG=$SB/alert.log|" "$R/usr/local/bin/nasrpi-smartd-alert.sh" > "$SB/run-alert.sh"
-if echo "simulated smartd alert mail body" \
-   | PATH="$SB/bin:$PATH" sh "$SB/run-alert.sh" /dev/disk/by-id/ata-WDC_WD40 > "$T/03b.out" 2>&1; then
-  echo "  PASS: alert handler exits 0"; pass=$((pass+1))
+chmod +x "$SMB/bin/sendmail" "$SMB/bin/smartctl"
+# redirect the /dev/sd? scan into the sandbox (also hits the 'no disks' text, harmless)
+sed "s|/dev/sd?|$T/smartdev/sd?|g" "$REP" > "$SMB/run-report.sh"
+
+# run A: everything healthy -> plain daily report, no ALARM anywhere
+: > "$T/smartmail.out"
+if SENDMAIL="$SMB/bin/sendmail" FAKE_HEALTH=PASSED FAKE_197=0 \
+     PATH="$SMB/bin:$PATH" bash "$SMB/run-report.sh" > "$T/03a.out" 2>&1; then
+  echo "  PASS: report run exits 0"; pass=$((pass+1))
 else
-  echo "  FAIL: alert handler failed"; cat "$T/03b.out"; fail=$((fail+1))
+  echo "  FAIL: report run failed"; cat "$T/03a.out"; fail=$((fail+1))
 fi
-check "handler mailed unmount note" "UNMOUNTED /media/test"     "$T/mail.out"
-check "handler mailed the report"   "SMART alert for /dev/disk/by-id/ata-WDC_WD40" "$T/mail.out"
-check "handler called umount -R"    "umount -R /media/test"     "$SB/umount.log"
+check "healthy mail has plain subject"  "Subject: nasrpi daily SMART status" "$T/smartmail.out"
+check "report covers both disks"      "===== $T/smartdev/sdb =====" "$T/smartmail.out"
+checknot "no ALARM when healthy"       "ALARM"                     "$T/smartmail.out"
+
+# run B: pending sectors went above 0 on sdb -> ALARM subject + details
+: > "$T/smartmail.out"
+SENDMAIL="$SMB/bin/sendmail" FAKE_HEALTH=PASSED FAKE_197=12 \
+  PATH="$SMB/bin:$PATH" bash "$SMB/run-report.sh" > "$T/03b.out" 2>&1
+check "ALARM subject on bad attr"      "Subject: ALARM ALARM ALARM" "$T/smartmail.out"
+check "alarm names attr and disk"      "sdb: attribute 197 raw value 12" "$T/smartmail.out"
+
+# run C: overall-health FAILED is an alarm too
+: > "$T/smartmail.out"
+SENDMAIL="$SMB/bin/sendmail" FAKE_HEALTH=FAILED FAKE_197=0 \
+  PATH="$SMB/bin:$PATH" bash "$SMB/run-report.sh" > "$T/03c.out" 2>&1
+check "ALARM subject on failed health" "Subject: ALARM ALARM ALARM" "$T/smartmail.out"
+check "failed health reported"         "overall-health self-assessment FAILED" "$T/smartmail.out"
 
 echo "=== cron files sanity"
 for f in "$R"/etc/cron.d/nasrpi-*; do
-  if grep -qE '^[0-9]{1,2} [0-9]{1,2} \* \* [0-6] root ' "$f"; then
+  if grep -qE '^[0-9]{1,2} [0-9]{1,2} \* \* [0-6*] root ' "$f"; then
+    # NOTE: [0-6*] -- the SMART report runs daily (dow = *), others weekly
     echo "  PASS: $(basename "$f") schedule line"; pass=$((pass+1))
   else
     echo "  FAIL: bad cron line in $f"; fail=$((fail+1))
@@ -371,7 +411,9 @@ for f in "$R"/etc/cron.d/nasrpi-*; do
 done
 
 echo "=== pizauth seal/unseal helpers (real gpg, unprivileged)"
-if ./test_pizauth_seal.sh > "$T/seal.out" 2>&1; then
+if [ ! -f ./test_pizauth_seal.sh ]; then
+  echo "  SKIP: test_pizauth_seal.sh not present in the repo"
+elif ./test_pizauth_seal.sh > "$T/seal.out" 2>&1; then
   echo "  PASS: LAN-sealed token dump works"; pass=$((pass+1))
   tail -2 "$T/seal.out" | sed 's/^/    /'
 else

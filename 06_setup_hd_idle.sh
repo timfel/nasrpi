@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 06_setup_hd_idle.sh
-# - make sure idle disks actually spin DOWN (03 only keeps SMART from waking them)
+# - make sure idle disks actually spin DOWN (03 removed smartd entirely, so
+#   nothing polls the disks; this script makes them actually spin DOWN)
 # - hd-idle rather than hdparm -S: every disk here sits in a USB/USB-SATA
 #   enclosure, and those bridges usually ignore the ATA standby timer entirely.
 #   hd-idle issues the SCSI START STOP UNIT that those bridges do understand.
