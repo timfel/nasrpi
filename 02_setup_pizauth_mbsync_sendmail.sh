@@ -580,7 +580,14 @@ conf_new="$TMP/conf.new"
   # echo
   # echo "# OAuth callback: only on loopback. Reach it from your laptop with"
   # echo "#   ssh -N -L 127.0.0.1:$AUTH_PORT:127.0.0.1:$AUTH_PORT $SSH_TARGET"
-  printf 'http_listen = "localhost:%s";\n' "$AUTH_PORT"
+  # MUST be a literal IPv4 address, not "localhost": pizauth's TcpListener::bind
+  # binds only the FIRST address getaddrinfo returns, and on a Pi "localhost"
+  # usually resolves to ::1 first -- which makes the laptop's
+  # `ssh -L 127.0.0.1:PORT:127.0.0.1:PORT` tunnel hit "Connection refused".
+  # (The OAuth redirect_uri stays http://localhost:PORT/ regardless, so the
+  # redirect URI registered with the provider is unaffected. This matches
+  # pizauth's own README and its built-in default of 127.0.0.1:0.)
+  printf 'http_listen = "127.0.0.1:%s";\n' "$AUTH_PORT"
   echo 'startup_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-restore";'
   echo 'token_event_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-dump";'
   echo 'auth_notify_cmd = "/bin/sh /usr/local/bin/nasrpi-pizauth-notify auth";'
@@ -590,6 +597,12 @@ conf_new="$TMP/conf.new"
   cat "$new_blocks"
 } > "$conf_new"
 
+# Did anything actually change vs the installed config? (Restart decision below.)
+conf_changed=1
+if [ "${DRY_RUN:-0}" != "1" ] && [ -f "$PIZAUTH_CONF" ] \
+   && $NASRPI_SUDO cmp -s "$PIZAUTH_CONF" "$conf_new" 2>/dev/null; then
+  conf_changed=0
+fi
 # write_file only touches the file when something actually changed
 write_file 600 "$PIZAUTH_CONF" "sudo" "force" < "$conf_new"
 chmod 600 "$conf_new" 2>/dev/null || true
@@ -651,7 +664,15 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
 else
   $NASRPI_SUDO systemctl daemon-reload
   if $NASRPI_SUDO systemctl is-active --quiet pizauth; then
-    ok "pizauth already running"
+    if [ "$conf_changed" = 1 ]; then
+      # 'pizauth reload' updates accounts only; the http callback listener is
+      # bound once when the server starts, so a config change (http_listen,
+      # port ...) needs a full restart to take effect.
+      warn "config changed -- restarting pizauth so the OAuth callback listener rebinds"
+      $NASRPI_SUDO systemctl restart pizauth
+    else
+      ok "pizauth already running"
+    fi
   else
     $NASRPI_SUDO systemctl enable --now pizauth
   fi
