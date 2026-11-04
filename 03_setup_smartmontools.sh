@@ -24,7 +24,7 @@ ask NOTIFY_EMAIL "Address to receive SMART alerts" "root"
 MON=()
 declare -A seen        # avoid double-monitoring the same disk via id aliases
 BY_ID_DIR="${NASRPI_BY_ID_DIR:-/dev/disk/by-id}"   # test hook: fake by-id tree
-for link in "$BY_ID_DIR"/ata*; do
+for link in "$BY_ID_DIR"/*; do
   [ -L "$link" ] || continue
   tgt=$(readlink -f "$link")
   # keep only whole /dev/sdX disks (no partitions, no mmcblk/nvme/loop/dm)
@@ -173,4 +173,9 @@ ask SMART_REPORT_HOUR "Daily SMART report hour (0-23)" "7"
 # Install directly: /etc/cron.d supports daily timing independent of weekly helpers.
 install_cron nasrpi-smart-report "* $SMART_REPORT_HOUR 0" "/usr/local/bin/nasrpi-smart-report.sh"
 
-say "03 done. Test with: echo test | sudo $ALERT_BIN /dev/sda"
+say "03 done. Test with: echo test | sudo $ALERT_BIN /dev/sda
+If you want to configure how often the smart checks happen if some
+disks, for example, do not respect the '-n standby' directive, then
+set /etc/default/smartmontools to use a larger interval (e.g. 86400
+for once per day) and restart the service at the time of day you
+want this."
