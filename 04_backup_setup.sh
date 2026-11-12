@@ -2,9 +2,10 @@
 
 # Two backup cron jobs, both mailing a report through sendmail
 #
-#   media   rsync /media/media -> /media/media_backup, SMART on those two disks
+#   media   rsync /media/media -> /media/media_backup, SMART on the disks behind them
 #   nas     mbsync + rclone into /media/nas, rsync /media/nas -> /media/nas_backup,
-#           SMART on those two disks
+#           SMART on the disks behind them (all of them: /media/nas_backup is a
+#           mergerfs pool, so every disk in the pool gets a self-test)
 #
 # SMART: attributes 5, 187, 197 and 198 must stay at zero. If any of them is
 # above zero the mail subject starts with ALERT ALERT ALERT and the mountpoint
@@ -20,7 +21,18 @@ cat <<'EOF' | sudo tee /usr/local/bin/nasrpi-backup.sh
 # nasrpi backup jobs. Installed by 04_backup_setup.sh; rerun 04 to change it.
 #   nasrpi-backup.sh media   rsync /media/media -> /media/media_backup + SMART
 #   nasrpi-backup.sh nas     mbsync + rclone + rsync /media/nas -> /media/nas_backup + SMART
+# SMART runs on the disk(s) behind each mountpoint, so a mergerfs pool means one
+# self-test per branch disk, one after another (a few minutes each).
 set -u
+
+# cron runs /etc/cron.d jobs with PATH=/usr/bin:/bin. sendmail is not there
+# (msmtp-mta puts it in /usr/sbin) and /usr/local/bin is missing too, so
+# anything installed by hand is invisible as well. The failure was quiet: the
+# script's last line died with "sendmail: command not found", cron mailed that
+# single line of stderr to root, and Gmail refused <root> as an address, so no
+# report arrived at all. A sane PATH fixes the job.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 BAD_ATTRS="5 187 197 198"                 # raw values must stay at zero
 DELETE_PCT=1                              # never delete more than this % of the destination
@@ -29,17 +41,61 @@ REPORT=$(mktemp)
 BAD=$(mktemp)                             # one "mountpoint disk what" per line
 trap 'rm -f "$REPORT" "$BAD"' EXIT
 
+# this script mails its own report at the bottom, so it wants to leave nothing
+# on stdout/stderr for cron to mail separately. Stray stderr (a tool complaining
+# on its own, a typo in a line we did not redirect) belongs in the report, so
+# that is where it goes instead of into a second, root-addressed mail.
+exec 2>> "$REPORT"
+
 say() { echo "$*" >> "$REPORT"; }
 
-# the block disks behind a mountpoint, whatever /dev/sdX they are today
-disks_for() {
-    local want=$1 dev
-    for dev in /dev/sd?; do
-        [ -b "$dev" ] || continue
-        if lsblk -rno MOUNTPOINTS "$dev" 2>/dev/null | tr ' ,' '\n\n' | grep -qx "$want"; then
-            echo "$dev"
+# a partition is the same physical disk as the whole device it sits on:
+# /dev/sdb1 -> /dev/sdb, /dev/mmcblk0p1 -> /dev/mmcblk0
+disk_of() {
+    local src=$1 pk
+    pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1 | tr -d '[:space:]')
+    if [ -n "$pk" ]; then echo "/dev/$pk"; else echo "$src"; fi
+}
+
+# what a mountpoint is mounted from, one line per branch: either a block device
+# (/dev/sdb1) or a lower directory that is itself a mount (/media/laptop1t).
+branches_under() {
+    local want=$1 src pid
+    # \040 is how /proc/mounts escapes a space in a path
+    src=$(awk -v mp="$want" '{ s=$1; t=$2; gsub(/\\040/, " ", s); gsub(/\\040/, " ", t); if (t == mp) { print s; exit } }' /proc/mounts)
+    case "$src" in
+        /dev/*|/*) echo "$src"; return 0 ;;
+    esac
+    # a mergerfs pool gives no device away here: fsname=mergerfs replaces the
+    # branch list in its /proc/mounts line. The running mount still knows it,
+    # /proc/PID/cmdline reads "mergerfs <branches> <mountpoint> -o ...".
+    for pid in $(pgrep -x mergerfs 2>/dev/null); do
+        local -a argv=()
+        mapfile -d '' argv < "/proc/$pid/cmdline" 2>/dev/null
+        if [ "${argv[0]:-}" = mergerfs ] && [ "${argv[2]:-}" = "$want" ]; then
+            printf '%s\n' "${argv[1]}" | tr ':' '\n'
+            return 0
         fi
     done
+    # last resort: the fstab entry, which configures the same pool
+    awk -v mp="$want" '$1 !~ /^#/ && $2 == mp { print $1; exit }' /etc/fstab | tr ':' '\n'
+}
+
+# the block disks behind a mountpoint, whatever /dev/sdX they are today.
+# /proc/mounts is the authority, so bind mounts count (/media/media is a bind
+# of /media/mybook12t and still reports /dev/sdb1), and a mergerfs pool is
+# followed down into its branch directories. The depth limit only exists to
+# keep two mounts bound to each other from recursing forever.
+disks_for() {
+    local want=$1 depth=${2:-4} src
+    [ "$depth" -gt 0 ] || return 0
+    while read -r src; do
+        [ -n "$src" ] || continue
+        case "$src" in
+            /dev/*) disk_of "$src" ;;
+            /*)     [ "$src" = "$want" ] || disks_for "$src" $(( depth - 1 )) ;;
+        esac
+    done < <(branches_under "$want")
 }
 
 # start a short self-test and wait for it, so the status read below is current.
@@ -70,7 +126,7 @@ selftest_short() {
 smart() {
     local mp=$1 dev out a raw
     say "===== SMART: $mp ====="
-    for dev in $(disks_for "$mp"); do
+    for dev in $(disks_for "$mp" | sort -u); do
         say "--- $dev"
         if [ -s "$BAD" ]; then
             say "    self-test skipped: something is already bad"
@@ -170,11 +226,16 @@ fi
         echo
     fi
     cat "$REPORT"
-} | sendmail -t
+} | sendmail -t          # -t: the To: header above decides the recipient; the
+                        # envelope sender comes from /etc/msmtprc, not from cron
 EOF
 sudo chmod +x /usr/local/bin/nasrpi-backup.sh
 
 cat <<'EOF' | sudo tee /etc/cron.d/nasrpi-backup
+# the script mails its own report, so cron must not mail another one. Without
+# this cron sends whatever the job leaves on stdout/stderr to the job owner
+# (root), and Gmail answers 553 5.1.3 "<root> is not a valid RFC 5321 address".
+MAILTO=""
 0 10 * * 4   root  /usr/local/bin/nasrpi-backup.sh media
 0 10 * * 3   root  /usr/local/bin/nasrpi-backup.sh nas
 EOF
